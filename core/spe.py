@@ -124,54 +124,155 @@ class StrategyPricingEngine:
         no_ob: OrderBookSnapshot,
     ) -> None:
         """
-        核心套利评估
+        核心套利评估 (v1.2 改进版)
         
-        步骤:
-        1. 检查双方 best ask 是否存在
-        2. 计算理论价差: spread = 1 - (best_ask_yes + best_ask_no)
-        3. 计算 VWAP: 穿透订单簿至 max_trade_size
-        4. 检查利润阈值
-        5. 生成 TradeSignal
+        套利模式识别:
+        
+        模式 A — 经典双边 ASK 套利:
+          buy YES at Ask(YES) + buy NO at Ask(NO)
+          条件: Ask_YES + Ask_NO < 1
+          利润: 1 - (Ask_YES + Ask_NO)
+        
+        模式 B — ASK+BID 交叉套利 (更常见但有 Leg Risk):
+          buy YES at Ask(YES), sell NO at Bid(NO)
+          条件: Ask_YES + Bid_NO < Ask_YES
+          等价于 Ask_YES < 1 - Bid_NO = Ask_NO_implied
+        
+        v1.2 改进:
+        1. 同时检测两种套利模式
+        2. 深度诊断日志: 即使无套利也记录 BBO
+        3. 低深度订单簿预警
         """
-        if not yes_ob.asks or not no_ob.asks:
-            return
+        if not yes_ob.asks and not yes_ob.bids and not no_ob.asks and not no_ob.bids:
+            return  # 两边都空
 
         best_ask_yes = yes_ob.best_ask
+        best_bid_yes = yes_ob.best_bid
         best_ask_no = no_ob.best_ask
+        best_bid_no = no_ob.best_bid
 
-        if not best_ask_yes or not best_ask_no:
-            return
-
-        # ================================================================
-        # 步骤 1: 理论价差检查 (快速预筛选)
-        # ================================================================
-        theoretical_spread = 1.0 - (best_ask_yes.price + best_ask_no.price)
-        if theoretical_spread <= 0:
-            return  # 无套利空间
+        yes_depth = len(yes_ob.asks)
+        no_depth = len(no_ob.asks)
 
         # ================================================================
-        # 步骤 2: VWAP 计算 - 穿透订单簿模拟真实成本
+        # 深度诊断日志 (每 100 个快照记录一次)
         # ================================================================
-        trade_size_usd = self.cfg.max_trade_size
-
-        vwap_yes, size_yes, slip_yes = self._calculate_vwap(
-            yes_ob.asks, trade_size_usd
-        )
-        vwap_no, size_no, slip_no = self._calculate_vwap(
-            no_ob.asks, trade_size_usd
-        )
-
-        # 取两者较小值为实际可成交量
-        actual_size = min(size_yes, size_no)
-        if actual_size <= 0:
-            return
+        signal_key = f"{condition_id[:16]}"
+        now = time.time()
+        last_diag = getattr(self, '_last_diag_ts', {}).get(signal_key, 0)
+        if now - last_diag > 60:  # 每分钟最多一次诊断
+            if not hasattr(self, '_last_diag_ts'):
+                self._last_diag_ts = {}
+            self._last_diag_ts[signal_key] = now
+            
+            ask_y = best_ask_yes.price if best_ask_yes else None
+            bid_y = best_bid_yes.price if best_bid_yes else None
+            ask_n = best_ask_no.price if best_ask_no else None
+            bid_n = best_bid_no.price if best_bid_no else None
+            
+            logger.debug(
+                "spe_bbo_diagnostic",
+                condition_id=condition_id[:16],
+                yes_ask=ask_y,
+                yes_bid=bid_y,
+                no_ask=ask_n,
+                no_bid=bid_n,
+                yes_depth=yes_depth,
+                no_depth=no_depth,
+            )
+            
+            # 低深度预警
+            if yes_depth < 3 or no_depth < 3:
+                logger.debug(
+                    "spe_low_depth",
+                    condition_id=condition_id[:16],
+                    yes_depth=yes_depth,
+                    no_depth=no_depth,
+                )
 
         # ================================================================
-        # 步骤 3: 实际利润计算
+        # 模式 A: 双边 ASK 套利
+        # buy YES at Ask + buy NO at Ask
+        # 条件: Ask_YES + Ask_NO < 1
         # ================================================================
-        total_cost = vwap_yes * actual_size + vwap_no * actual_size
-        total_payout = actual_size  # 二元市场: 无论 YES/NO, 赔付 $1 * size
-        expected_profit = total_payout - total_cost
+        if best_ask_yes and best_ask_no:
+            theoretical_spread = 1.0 - (best_ask_yes.price + best_ask_no.price)
+
+            if theoretical_spread > 0:
+                # 理论上有空间, 计算 VWAP 穿透
+                trade_size_usd = self.cfg.max_trade_size
+
+                vwap_yes, size_yes, slip_yes = self._calculate_vwap(
+                    yes_ob.asks, trade_size_usd
+                )
+                vwap_no, size_no, slip_no = self._calculate_vwap(
+                    no_ob.asks, trade_size_usd
+                )
+
+                actual_size = min(size_yes, size_no)
+                if actual_size <= 0:
+                    return
+
+                total_cost = vwap_yes * actual_size + vwap_no * actual_size
+                total_payout = actual_size
+                expected_profit = total_payout - total_cost
+                total_slippage = (slip_yes + slip_no) * actual_size
+                net_profit = expected_profit - total_slippage
+
+                if net_profit >= self.cfg.min_profit_threshold:
+                    self._generate_signal(
+                        signal_type=SignalType.ARBITRAGE,
+                        condition_id=condition_id,
+                        yes_ob=yes_ob,
+                        no_ob=no_ob,
+                        vwap_yes=vwap_yes,
+                        vwap_no=vwap_no,
+                        actual_size=actual_size,
+                        expected_profit=net_profit,
+                        total_slippage=total_slippage,
+                        total_cost=total_cost,
+                        theoretical_spread=theoretical_spread,
+                    )
+                    return
+
+        # ================================================================
+        # 模式 B: ASK+BID 交叉套利 (较少见但更重要)
+        # 买入被低估方, 卖出 (作为 maker) 被高估方
+        # 条件: Ask(cheap) < 1 - Bid(expensive)
+        # 例: YES_ask=0.45, NO_bid=0.48 > YES_ask < 1-0.48=0.52 ✓
+        # ================================================================
+        if best_ask_yes and best_bid_no:
+            # 买 YES, 想 NO 的 bid 方卖 NO
+            # 即: YES_ask < 1 - NO_bid
+            implied_no_ask = 1.0 - best_bid_no.price
+            if best_ask_yes.price < implied_no_ask:
+                potential_spread = implied_no_ask - best_ask_yes.price
+                # 这需要 maker 侧策略, 暂不实现
+                # 但记录诊断
+                logger.debug(
+                    "spe_cross_arb_detected",
+                    condition_id=condition_id[:16],
+                    yes_ask=best_ask_yes.price,
+                    no_bid=best_bid_no.price if best_bid_no else None,
+                    implied_no_ask=implied_no_ask,
+                    spread=potential_spread,
+                    note="ASK+BID cross arb (maker strategy required)",
+                )
+
+        if best_ask_no and best_bid_yes:
+            # 对称: 买 NO, YES_ask > 1 - YES_bid
+            implied_yes_ask = 1.0 - best_bid_yes.price
+            if best_ask_no.price < implied_yes_ask:
+                potential_spread = implied_yes_ask - best_ask_no.price
+                logger.debug(
+                    "spe_cross_arb_detected",
+                    condition_id=condition_id[:16],
+                    no_ask=best_ask_no.price,
+                    yes_bid=best_bid_yes.price,
+                    implied_yes_ask=implied_yes_ask,
+                    spread=potential_spread,
+                    note="NO ASK + YES BID cross arb (maker strategy)",
+                )
         total_slippage = (slip_yes + slip_no) * actual_size
 
         # 扣除滑点后的净利
@@ -180,26 +281,35 @@ class StrategyPricingEngine:
         if net_profit < self.cfg.min_profit_threshold:
             return
 
-        # ================================================================
-        # 步骤 4: 去重检查
-        # ================================================================
-        signal_key = f"{condition_id}:{vwap_yes:.4f}:{vwap_no:.4f}"
+    def _generate_signal(
+        self,
+        signal_type: SignalType,
+        condition_id: str,
+        yes_ob: OrderBookSnapshot,
+        no_ob: OrderBookSnapshot,
+        vwap_yes: float,
+        vwap_no: float,
+        actual_size: float,
+        expected_profit: float,
+        total_slippage: float,
+        total_cost: float,
+        theoretical_spread: float = 0.0,
+    ) -> None:
+        """生成 TradeSignal 并推入执行队列"""
         now = time.time()
+        signal_key = f"{condition_id}:{vwap_yes:.4f}:{vwap_no:.4f}"
         last_sent = self._recent_signals.get(signal_key, 0)
         if now - last_sent < self._signal_dedup_window:
-            return  # 2秒内已发过类似信号, 跳过
+            return
 
         self._recent_signals[signal_key] = now
 
-        # ================================================================
-        # 步骤 5: 生成 TradeSignal
-        # ================================================================
         market = self._markets.get(condition_id, None)
         question = market.question if market else condition_id[:16]
 
         signal = TradeSignal(
             signal_id=str(uuid.uuid4()),
-            signal_type=SignalType.ARBITRAGE,
+            signal_type=signal_type,
             condition_id=condition_id,
             market_question=question,
             yes_token_id=yes_ob.token_id,
@@ -208,14 +318,13 @@ class StrategyPricingEngine:
             no_token_id=no_ob.token_id,
             no_price=vwap_no,
             no_size=actual_size,
-            expected_profit=net_profit,
+            expected_profit=expected_profit,
             slippage_estimate=total_slippage,
             total_cost=total_cost,
             timestamp=now,
-            priority=0,  # 0=最高优先级
+            priority=0,
         )
 
-        # 推入执行队列
         try:
             self.signal_queue.put_nowait(signal)
             logger.info(
@@ -225,7 +334,7 @@ class StrategyPricingEngine:
                 vwap_yes=f"{vwap_yes:.4f}",
                 vwap_no=f"{vwap_no:.4f}",
                 size=actual_size,
-                profit=f"${net_profit:.4f}",
+                profit=f"${expected_profit:.4f}",
                 spread=f"{theoretical_spread:.4f}",
             )
         except asyncio.QueueFull:
