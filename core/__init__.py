@@ -20,7 +20,7 @@ from core.models import (
 from core.clob_client import get_clob_client, ClobClientManager
 from core.mdg import MarketDataGateway
 from core.spe import StrategyPricingEngine
-from core.oeg import OrderExecutionGateway
+from core.oeg import OrderExecutionGateway, FillTracker, OrderTracker
 from core.rmc import RiskManagementCenter
 
 __all__ = [
@@ -42,5 +42,7 @@ __all__ = [
     "MarketDataGateway",
     "StrategyPricingEngine",
     "OrderExecutionGateway",
+    "FillTracker",
+    "OrderTracker",
     "RiskManagementCenter",
 ]

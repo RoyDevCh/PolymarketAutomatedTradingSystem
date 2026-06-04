@@ -20,7 +20,8 @@ load_dotenv(_env_path, override=True)
 class CLOBConfig:
     """CLOB API 配置"""
     api_url: str = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
-    ws_url: str = os.getenv("CLOB_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws")
+    ws_market_url: str = os.getenv("CLOB_WS_MARKET_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market")
+    ws_user_url: str = os.getenv("CLOB_WS_USER_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/user")
     api_key: str = os.getenv("API_KEY", "")
     api_secret: str = os.getenv("API_SECRET", "")
     api_passphrase: str = os.getenv("API_PASSPHRASE", "")

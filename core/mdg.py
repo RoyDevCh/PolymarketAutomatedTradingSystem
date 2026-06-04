@@ -3,9 +3,16 @@ Polymarket 自动套利系统 - 市场数据网关 (MDG)
 
 职责:
 1. 通过 Gamma API 定期发现活跃市场
-2. 建立 CLOB WebSocket 长连接, 订阅实时订单簿
-3. 在本地内存中维护增量订单簿镜像
+2. 建立 Market Channel WebSocket 长连接, 订阅实时订单簿
+3. 在本地内存中维护增量订单簿镜像 (REST 快照 + WS 增量)
 4. 向下游 SPE 推送 BBO / 完整快照
+
+v1.1 修正:
+  - Market Channel 订阅协议修正为官方规格:
+    assets_ids (非 markets), type="market", custom_feature_enabled
+  - 事件类型: book / price_change / last_trade_price / tick_size_change
+  - 心跳: 客户端每 10s 发送 PING
+  - 重连后先 REST 快照再 WS 订阅, 避免增量遗漏
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import structlog
 from sortedcontainers import SortedDict
 
 from core.config import CONFIG
+from core.clob_client import get_clob_client
 from core.models import MarketInfo, OrderBookSnapshot, PriceLevel
 
 logger = structlog.get_logger(__name__)
@@ -135,6 +143,7 @@ class MarketDataGateway:
         # WebSocket 会话
         self._ws_session: Optional[aiohttp.ClientSession] = None
         self._ws_connection: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_heartbeat_task: Optional[asyncio.Task] = None
         self._running: bool = False
 
         # 同一 condition_id 下的 YES/NO token 映射
@@ -233,12 +242,17 @@ class MarketDataGateway:
 
     async def subscribe_orderbooks(self, token_ids: list[str]) -> None:
         """
-        建立 WebSocket 连接并订阅指定 token 的订单簿
+        建立 Market Channel WebSocket 连接并订阅实时订单簿
         
-        协议:
-        1. 连接 wss://ws-subscriptions-clob.polymarket.com/ws
-        2. 发送订阅消息: {"auth":{}, "markets":[token_ids], "type":"market"}
-        3. 接收增量推送并更新本地镜像
+        协议 (官方规格 2026-04 CLOB V2):
+        1. 首先通过 REST API 获取初始快照
+        2. 连接 wss://ws-subscriptions-clob.polymarket.com/ws/market
+        3. 发送订阅消息:
+           {"assets_ids": ["token_id_1", ...],
+            "type": "market",
+            "custom_feature_enabled": true}
+        4. 接收增量推送并更新本地镜像
+        5. 客户端每 10s 发送 PING 心跳
         """
         self._running = True
 
@@ -269,32 +283,45 @@ class MarketDataGateway:
         logger.warning("mdg_ws_stopped", reason="max_retries_exceeded")
 
     async def _ws_connect_and_listen(self, token_ids: list[str]) -> None:
-        """建立 WebSocket 连接并处理消息"""
+        """建立 Market Channel WebSocket 连接并处理消息"""
+        # v1.1: 使用官方 Market Channel 端点
+        ws_url = self.ws_cfg.ws_market_url
+
         self._ws_session = aiohttp.ClientSession()
 
         try:
             self._ws_connection = await self._ws_session.ws_connect(
-                self.ws_cfg.ws_url,
+                ws_url,
                 heartbeat=30,
                 receive_timeout=60,
             )
-            logger.info("ws_connected", url=self.ws_cfg.ws_url)
+            logger.info("mdg_ws_connected", url=ws_url)
 
-            # 发送订阅请求
+            # v1.1: 使用官方规格的订阅格式
             subscribe_msg = {
-                "auth": {},
-                "markets": token_ids,
+                "assets_ids": token_ids,
                 "type": "market",
+                "custom_feature_enabled": True,  # 启用 best_bid_ask / tick_size_change 等事件
             }
             await self._ws_connection.send_json(subscribe_msg)
-            logger.info("ws_subscribed", token_count=len(token_ids))
+            logger.info("mdg_ws_subscribed", token_count=len(token_ids))
+
+            # v1.1: 启动心跳任务 (每10秒发送PING)
+            self._ws_heartbeat_task = asyncio.create_task(
+                self._ws_heartbeat(), name="mdg_heartbeat"
+            )
+
+            # 重连后先 REST 拉取快照再监听增量
+            await self._fetch_rest_snapshots(token_ids)
 
             # 消息监听循环
             async for msg in self._ws_connection:
                 if msg.type == aiohttp.WSMsgType.TEXT:
+                    if msg.data == "PONG":
+                        continue  # 心跳响应, 跳过
                     await self._handle_ws_message(msg.data)
                 elif msg.type == aiohttp.WSMsgType.ERROR:
-                    logger.error("ws_error", error=msg.data)
+                    logger.error("mdg_ws_error", error=msg.data)
                     break
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
                     break
@@ -303,34 +330,87 @@ class MarketDataGateway:
                     break
 
         finally:
+            if hasattr(self, '_ws_heartbeat_task') and self._ws_heartbeat_task:
+                self._ws_heartbeat_task.cancel()
             if self._ws_connection and not self._ws_connection.closed:
                 await self._ws_connection.close()
             if self._ws_session and not self._ws_session.closed:
                 await self._ws_session.close()
 
+    async def _ws_heartbeat(self) -> None:
+        """Market Channel 心跳: 每 10 秒发送 PING"""
+        while self._running:
+            try:
+                if self._ws_connection and not self._ws_connection.closed:
+                    await self._ws_connection.send_str("PING")
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("mdg_heartbeat_error", error=str(e))
+                break
+
+    async def _fetch_rest_snapshots(self, token_ids: list[str]) -> None:
+        """
+        v1.1: 重连后通过 REST API 拉取初始快照
+        确保增量更新不会基于过时的订单簿
+        """
+        client = None
+        try:
+            client = get_clob_client()
+        except Exception:
+            logger.warning("mdg_rest_snapshot_client_unavailable")
+            return
+
+        for token_id in token_ids:
+            try:
+                book = client.get_order_book(token_id)
+                if book and token_id in self._mirrors:
+                    asks_raw = []
+                    bids_raw = []
+                    if book.asks:
+                        asks_raw = [{"price": a.price, "size": a.size} for a in book.asks]
+                    if book.bids:
+                        bids_raw = [{"price": b.price, "size": b.size} for b in book.bids]
+                    self._mirrors[token_id].apply_snapshot(asks=asks_raw, bids=bids_raw)
+                    logger.debug("mdg_rest_snapshot_loaded", token_id=token_id[:16])
+            except Exception as e:
+                logger.warning("mdg_rest_snapshot_error", token_id=token_id[:16], error=str(e))
+
     async def _handle_ws_message(self, raw_data: str) -> None:
         """
         处理 WebSocket 推送消息
         
-        消息类型:
+        v1.1 修正后的 Market Channel 事件类型:
+        - book: 全量订单簿快照 (初次订阅或重连后)
         - price_change: 增量价格变动
-        - book_snapshot: 全量订单簿快照
+        - last_trade_price: 最新成交价
+        - tick_size_change: 最小价格变动单位变化
+        - best_bid_ask: 最优买卖价更新 (需 custom_feature_enabled)
         """
         try:
             data = json.loads(raw_data)
         except json.JSONDecodeError:
-            logger.warning("ws_invalid_json", raw=raw_data[:200])
+            logger.warning("mdg_ws_invalid_json", raw=raw_data[:200])
             return
 
         event_type = data.get("event_type", data.get("type", ""))
 
-        if event_type == "price_change":
-            await self._apply_delta_update(data)
-        elif event_type in ("book_snapshot", "snapshot"):
+        if event_type == "book":
+            # v1.1: 官方事件类型为 "book" 而非 "book_snapshot"
             await self._apply_snapshot_update(data)
+        elif event_type == "price_change":
+            await self._apply_delta_update(data)
+        elif event_type == "last_trade_price":
+            # 最新成交价, 用作辅助参考
+            self._handle_last_trade(data)
+        elif event_type == "tick_size_change":
+            self._handle_tick_size_change(data)
+        elif event_type == "best_bid_ask":
+            self._handle_best_bid_ask(data)
 
     async def _apply_snapshot_update(self, data: dict) -> None:
-        """处理全量快照推送"""
+        """处理全量快照推送 (event_type='book')"""
         token_id = data.get("asset_id", data.get("token_id", ""))
         mirror = self._mirrors.get(token_id)
 
@@ -340,7 +420,6 @@ class MarketDataGateway:
         asks_raw = data.get("asks", [])
         bids_raw = data.get("bids", [])
 
-        # 将嵌套列表转为标准格式
         asks = self._normalize_book_levels(asks_raw)
         bids = self._normalize_book_levels(bids_raw)
 
@@ -350,26 +429,95 @@ class MarketDataGateway:
         snapshot = mirror.get_snapshot()
         self.snapshot_callback(snapshot)
 
+    def _handle_last_trade(self, data: dict) -> None:
+        """处理最新成交价事件"""
+        token_id = data.get("asset_id", "")
+        price = data.get("price", "")
+        size = data.get("size", "")
+        side = data.get("side", "")
+        logger.debug(
+            "mdg_last_trade",
+            token_id=token_id[:16] if token_id else "N/A",
+            price=price,
+            size=size,
+            side=side,
+        )
+
+    def _handle_tick_size_change(self, data: dict) -> None:
+        """
+        处理 tick_size 变化事件
+        ⚠️ 关键: 如果 tick_size 变化, 需要更新下单时使用的最小价格精度
+        """
+        token_id = data.get("asset_id", "")
+        old_tick = data.get("old_tick_size", "")
+        new_tick = data.get("new_tick_size", "")
+        logger.info(
+            "mdg_tick_size_change",
+            token_id=token_id[:16] if token_id else "N/A",
+            old=old_tick,
+            new=new_tick,
+        )
+
+    def _handle_best_bid_ask(self, data: dict) -> None:
+        """
+        处理最优买卖价更新事件 (需 custom_feature_enabled=True)
+        用作快速 BBO 更新, 无需等待完整 book 快照
+        """
+        # price_changes 可能包含多个 token 的更新
+        changes = data.get("price_changes", [])
+        for change in changes:
+            token_id = change.get("asset_id", "")
+            best_bid = change.get("best_bid")
+            best_ask = change.get("best_ask")
+            if token_id and best_bid and best_ask and token_id in self._mirrors:
+                # 快速 BBO 更新 (不重建完整订单簿)
+                logger.debug(
+                    "mdg_best_bid_ask",
+                    token_id=token_id[:16],
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                )
+
     async def _apply_delta_update(self, data: dict) -> None:
-        """处理增量价格变动推送"""
-        token_id = data.get("asset_id", data.get("token_id", ""))
-        mirror = self._mirrors.get(token_id)
-
-        if not mirror:
-            return
-
-        changes = data.get("changes", data.get("price_changes", []))
+        """
+        处理增量价格变动推送 (event_type='price_change')
+        
+        v1.1 修正: price_changes 是列表, 每个 change 包含:
+          - asset_id: token ID
+          - price: 价格
+          - size: 数量 ("0" 表示删除该档位)
+          - side: BUY / SELL
+          - best_bid / best_ask: 最优买卖价 (可选)
+        """
+        # price_change 事件可能包含多个 token 的更新
+        changes = data.get("price_changes", [])
+        if not changes:
+            # 兼容旧格式: 单一 token 的变更
+            changes = [{
+                "asset_id": data.get("asset_id", ""),
+                "price": data.get("price", 0),
+                "size": data.get("size", 0),
+                "side": data.get("side", "sell"),
+            }]
 
         for change in changes:
+            token_id = change.get("asset_id", "")
+            mirror = self._mirrors.get(token_id)
+
+            if not mirror:
+                continue
+
             price = float(change.get("price", 0))
             size = float(change.get("size", 0))
-            side = change.get("side", "sell")   # "sell" = ask, "buy" = bid
+            # v1.1: side 字段使用 BUY / SELL (大写)
+            side_raw = change.get("side", "SELL").upper()
+            side = "sell" if side_raw == "SELL" else "buy"
 
             mirror.apply_delta(price=price, size=size, side=side)
 
-        # 推送给 SPE
-        snapshot = mirror.get_snapshot()
-        self.snapshot_callback(snapshot)
+            # 推送给 SPE
+            snapshot = mirror.get_snapshot()
+            self.snapshot_callback(snapshot)
 
     def _normalize_book_levels(self, levels: list) -> list[dict]:
         """
@@ -415,6 +563,8 @@ class MarketDataGateway:
     async def stop(self) -> None:
         """优雅关闭"""
         self._running = False
+        if self._ws_heartbeat_task and not self._ws_heartbeat_task.done():
+            self._ws_heartbeat_task.cancel()
         if self._ws_connection and not self._ws_connection.closed:
             await self._ws_connection.close()
         if self._ws_session and not self._ws_session.closed:
