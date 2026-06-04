@@ -103,7 +103,7 @@ class OrderBookMirror:
         ]
         bid_levels = [
             PriceLevel(price=p, size=s)
-            for p, s in self.bids.items(reverse=True)[:depth]
+            for p, s in list(reversed(self.bids.items()))[:depth]
         ]
 
         return OrderBookSnapshot(
@@ -434,33 +434,34 @@ class MarketDataGateway:
         """
         处理 WebSocket 推送消息
         
-        v1.1 修正后的 Market Channel 事件类型:
-        - book: 全量订单簿快照 (初次订阅或重连后)
-        - price_change: 增量价格变动
-        - last_trade_price: 最新成交价
-        - tick_size_change: 最小价格变动单位变化
-        - best_bid_ask: 最优买卖价更新 (需 custom_feature_enabled)
+        v1.2 修正: WS 可能发送 JSON 数组 (多个事件) 或单个对象
         """
         try:
-            data = json.loads(raw_data)
+            parsed = json.loads(raw_data)
         except json.JSONDecodeError:
             logger.warning("mdg_ws_invalid_json", raw=raw_data[:200])
             return
 
-        event_type = data.get("event_type", data.get("type", ""))
+        # 归一化: 无论是对象还是数组, 都转为事件列表
+        events = parsed if isinstance(parsed, list) else [parsed]
 
-        if event_type == "book":
-            # v1.1: 官方事件类型为 "book" 而非 "book_snapshot"
-            await self._apply_snapshot_update(data)
-        elif event_type == "price_change":
-            await self._apply_delta_update(data)
-        elif event_type == "last_trade_price":
-            # 最新成交价, 用作辅助参考
-            self._handle_last_trade(data)
-        elif event_type == "tick_size_change":
-            self._handle_tick_size_change(data)
-        elif event_type == "best_bid_ask":
-            self._handle_best_bid_ask(data)
+        for data in events:
+            event_type = data.get("event_type", data.get("type", ""))
+
+            if event_type == "book":
+                await self._apply_snapshot_update(data)
+            elif event_type == "price_change":
+                await self._apply_delta_update(data)
+            elif event_type == "last_trade_price":
+                self._handle_last_trade(data)
+            elif event_type == "tick_size_change":
+                self._handle_tick_size_change(data)
+            elif event_type == "best_bid_ask":
+                self._handle_best_bid_ask(data)
+            elif event_type == "new_market":
+                logger.debug("mdg_new_market", question=data.get("question", "")[:50])
+            else:
+                logger.debug("mdg_ws_unknown_event", event_type=event_type)
 
     async def _apply_snapshot_update(self, data: dict) -> None:
         """处理全量快照推送 (event_type='book')"""
