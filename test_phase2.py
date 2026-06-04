@@ -184,6 +184,9 @@ class ShadowModeRunner:
                 # 模拟网络延迟
                 await asyncio.sleep(0.3)
 
+                # 保存信号元数据到 RMC
+                await self.rmc.on_trade_signal(signal)
+
                 # 生成模拟结果
                 from core.models import (
                     ArbitrageResult,

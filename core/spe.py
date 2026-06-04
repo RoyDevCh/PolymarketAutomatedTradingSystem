@@ -209,31 +209,67 @@ class StrategyPricingEngine:
                     no_ob.asks, trade_size_usd
                 )
 
+                if vwap_yes <= 0 or vwap_no <= 0:
+                    return
+
                 actual_size = min(size_yes, size_no)
                 if actual_size <= 0:
                     return
 
-                total_cost = vwap_yes * actual_size + vwap_no * actual_size
-                total_payout = actual_size
-                expected_profit = total_payout - total_cost
-                total_slippage = (slip_yes + slip_no) * actual_size
-                net_profit = expected_profit - total_slippage
+                # ============================================================
+                # 利润计算 (v1.3 修正: VWAP 已含滑点, 不再双重扣除)
+                #
+                # 正确公式:
+                #   net_profit_per_share = 1.0 - vwap_yes - vwap_no
+                #   total_net_profit = net_profit_per_share * actual_size
+                #
+                # 原理: 购买 1 股 YES + 1 股 NO, 无论结果如何赔付 $1
+                #   成本 = vwap_yes + vwap_no (已含滑点)
+                #   利润 = 1 - vwap_yes - vwap_no (每股)
+                #
+                # 理论滑点 (仅供参考记录, 不影响利润计算):
+                #   slippage_per_share = (vwap_yes - best_ask) + (vwap_no - best_ask)
+                # ============================================================
+                net_profit_per_share = 1.0 - vwap_yes - vwap_no
+                total_net_profit = net_profit_per_share * actual_size
 
-                if net_profit >= self.cfg.min_profit_threshold:
-                    self._generate_signal(
-                        signal_type=SignalType.ARBITRAGE,
-                        condition_id=condition_id,
-                        yes_ob=yes_ob,
-                        no_ob=no_ob,
-                        vwap_yes=vwap_yes,
-                        vwap_no=vwap_no,
-                        actual_size=actual_size,
-                        expected_profit=net_profit,
-                        total_slippage=total_slippage,
-                        total_cost=total_cost,
-                        theoretical_spread=theoretical_spread,
-                    )
+                # 理论滑点 (仅供参考)
+                slippage_per_share = (vwap_yes - best_ask_yes.price) + (vwap_no - best_ask_no.price)
+                total_slippage = slippage_per_share * actual_size
+
+                # 理论最佳利润 (best ask 成交)
+                best_ask_cost = best_ask_yes.price + best_ask_no.price
+
+                logger.debug(
+                    "spe_arbitrage_calc",
+                    condition_id=condition_id[:16],
+                    vwap_yes=f"{vwap_yes:.4f}",
+                    vwap_no=f"{vwap_no:.4f}",
+                    best_ask_yes=f"{best_ask_yes.price:.4f}",
+                    best_ask_no=f"{best_ask_no.price:.4f}",
+                    actual_size=f"{actual_size:.4f}",
+                    net_profit=f"${total_net_profit:.4f}",
+                    slippage=f"${total_slippage:.4f}",
+                    spread=f"{theoretical_spread:.4f}",
+                )
+
+                if total_net_profit < self.cfg.min_profit_threshold:
                     return
+
+                self._generate_signal(
+                    signal_type=SignalType.ARBITRAGE,
+                    condition_id=condition_id,
+                    yes_ob=yes_ob,
+                    no_ob=no_ob,
+                    vwap_yes=vwap_yes,
+                    vwap_no=vwap_no,
+                    actual_size=actual_size,
+                    expected_profit=total_net_profit,
+                    total_slippage=total_slippage,
+                    total_cost=vwap_yes * actual_size + vwap_no * actual_size,
+                    theoretical_spread=theoretical_spread,
+                )
+                return
 
         # ================================================================
         # 模式 B: ASK+BID 交叉套利 (较少见但更重要)
@@ -273,13 +309,7 @@ class StrategyPricingEngine:
                     spread=potential_spread,
                     note="NO ASK + YES BID cross arb (maker strategy)",
                 )
-        total_slippage = (slip_yes + slip_no) * actual_size
 
-        # 扣除滑点后的净利
-        net_profit = expected_profit - total_slippage
-
-        if net_profit < self.cfg.min_profit_threshold:
-            return
 
     def _generate_signal(
         self,
@@ -398,13 +428,24 @@ class StrategyPricingEngine:
         return None
 
     async def process_updates_loop(self, queue: asyncio.Queue) -> None:
-        """后台任务: 从队列中持续消费订单簿更新"""
+        """后台任务: 从队列中持续消费订单簿更新
+        
+        v1.2: 每60秒清理过期信号去重记录, 防止内存泄漏
+        """
+        _cleanup_counter = 0
         while True:
             try:
                 snapshot: OrderBookSnapshot = await asyncio.wait_for(
                     queue.get(), timeout=1.0
                 )
                 self.on_orderbook_update(snapshot)
+                _cleanup_counter += 1
+                
+                # 每 1000 次更新清理一次过期去重记录
+                if _cleanup_counter >= 1000:
+                    _cleanup_counter = 0
+                    self.cleanup_stale_signals()
+                    
             except asyncio.TimeoutError:
                 continue
             except Exception as e:

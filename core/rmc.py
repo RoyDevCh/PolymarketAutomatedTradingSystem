@@ -83,6 +83,9 @@ class RiskManagementCenter:
         # ---- 写权限控制 ----
         self._write_paused: bool = False
         self._write_pause_until: float = 0.0
+        
+        # ---- 信号元数据缓存 (用于日志补全) ----
+        self._signal_meta: dict[str, dict] = {}  # signal_id -> {market_question, yes_price, no_price, slippage}
 
     # ================================================================
     # 数据库初始化
@@ -149,6 +152,20 @@ class RiskManagementCenter:
             )
         """)
 
+        await self._db.execute("""
+            CREATE VIEW IF NOT EXISTS v_daily_pnl AS
+            SELECT
+                date(timestamp, 'unixepoch') as trade_date,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN realized_profit > 0 THEN 1 ELSE 0 END) as winning_trades,
+                SUM(realized_profit) as total_profit,
+                AVG(slippage_estimate) as avg_slippage,
+                SUM(CASE WHEN has_leg_risk = 1 THEN 1 ELSE 0 END) as leg_risks
+            FROM trade_log
+            GROUP BY date(timestamp, 'unixepoch')
+            ORDER BY trade_date DESC
+        """)
+
         await self._db.commit()
         logger.info("rmc_db_initialized", path=self._db_path)
 
@@ -161,6 +178,23 @@ class RiskManagementCenter:
     # ================================================================
     # 交易结果处理
     # ================================================================
+
+    async def on_trade_signal(self, signal: "TradeSignal") -> None:
+        """接收 SPE 生成的信号, 缓存元数据供后续日志写入使用"""
+        self._signal_meta[signal.signal_id] = {
+            "market_question": signal.market_question,
+            "yes_price": signal.yes_price,
+            "no_price": signal.no_price,
+            "yes_size": signal.yes_size,
+            "no_size": signal.no_size,
+            "slippage": signal.slippage_estimate,
+            "expected_profit": signal.expected_profit,
+        }
+        # 限制缓存大小
+        if len(self._signal_meta) > 10000:
+            oldest = list(self._signal_meta.keys())[:5000]
+            for k in oldest:
+                del self._signal_meta[k]
 
     async def on_arbitrage_result(self, result: ArbitrageResult) -> None:
         """
@@ -325,9 +359,19 @@ class RiskManagementCenter:
     # ================================================================
 
     async def _log_result(self, result: ArbitrageResult) -> None:
-        """将套利结果写入 SQLite"""
+        """将套利结果写入 SQLite (v1.2: 从信号缓存补全元数据)"""
         if not self._db:
             return
+
+        # 从缓存中获取信号元数据
+        meta = self._signal_meta.pop(result.signal_id, {})
+        market_question = meta.get("market_question", "")
+        yes_price = meta.get("yes_price", 0.0)
+        no_price = meta.get("no_price", 0.0)
+        yes_size = meta.get("yes_size", result.yes_result.filled_size)
+        no_size = meta.get("no_size", result.no_result.filled_size)
+        slippage = meta.get("slippage", 0.0)
+        expected_profit = meta.get("expected_profit", 0.0)
 
         try:
             await self._db.execute(
@@ -348,14 +392,14 @@ class RiskManagementCenter:
                     time.time(),
                     result.signal_id,
                     result.condition_id,
-                    "",  # market_question 需要从 signal 填充
+                    market_question,
                     result.yes_result.token_id,
                     result.no_result.token_id,
-                    0.0,  # from signal, 需在 on_arbitrage_result 中补充
-                    0.0,
-                    result.yes_result.filled_size,
-                    result.no_result.filled_size,
-                    0.0,
+                    yes_price,
+                    no_price,
+                    yes_size,
+                    no_size,
+                    expected_profit,
                     result.realized_profit,
                     result.yes_result.order_id,
                     result.no_result.order_id,
@@ -365,11 +409,18 @@ class RiskManagementCenter:
                     result.no_result.avg_fill_price,
                     result.yes_result.filled_size,
                     result.no_result.filled_size,
-                    0.0,  # slippage from signal
+                    slippage,
                     1 if result.has_leg_risk else 0,
                 ),
             )
             await self._db.commit()
+            logger.debug(
+                "rmc_trade_logged",
+                signal_id=result.signal_id[:8],
+                question=market_question[:40],
+                profit=f"${result.realized_profit:.4f}",
+                slippage=f"${slippage:.4f}",
+            )
         except Exception as e:
             logger.error("rmc_log_error", error=str(e))
 

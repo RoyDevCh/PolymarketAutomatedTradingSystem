@@ -100,7 +100,7 @@ class ArbitrageEngine:
 
         # ── 异步队列 (模块间数据通道) ──
         self.snapshot_queue: asyncio.Queue = asyncio.Queue(maxsize=CONFIG.max_queue_size)
-        self.signal_queue: asyncio.Queue = asyncio.Queue(max_size=CONFIG.max_queue_size)
+        self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=CONFIG.max_queue_size)
 
         # ── 初始化四大核心模块 ──
         # RMC 先初始化 (OEG 需要传给它回调)
@@ -220,6 +220,9 @@ class ArbitrageEngine:
                 signal = await asyncio.wait_for(
                     self.signal_queue.get(), timeout=1.0
                 )
+                # 保存信号元数据到 RMC (用于日志补全)
+                await self.rmc.on_trade_signal(signal)
+
                 logger.info(
                     "DRY_RUN_SIGNAL",
                     signal_id=signal.signal_id[:8],
