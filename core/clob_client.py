@@ -25,6 +25,9 @@ class ClobClientManager:
     1. 全局只创建一个 ClobClient 实例
     2. 密钥从 .env 加载, 代码中无硬编码
     3. 提供 create() / get() 双入口, 惰性初始化
+    4. 支持三阶段初始化:
+       - Level 1: 仅 PRIVATE_KEY → 可调用 create_api_key / derive_api_key
+       - Level 2: PRIVATE_KEY + API_KEY/SECRET/PASSPHRASE → 完整交易能力
     """
 
     _instance: Optional[ClobClient] = None
@@ -35,10 +38,9 @@ class ClobClientManager:
         """
         创建并初始化 CLOB Client 单例
         
-        流程:
-        1. 使用 L1 私钥 + L2 凭证构建 ApiCreds
-        2. 指定 Polygon Mainnet (chain_id=137)
-        3. 调用 derive_api_key 完成链上注册 (仅需一次)
+        支持两种模式:
+        1. Level 1 (仅私钥): 用途是 create_api_key
+        2. Level 2 (私钥 + API 凭证): 完整交易能力
         """
         if cls._instance is not None:
             logger.debug("ClobClient 单例已存在, 跳过重复创建")
@@ -46,33 +48,51 @@ class ClobClientManager:
 
         logger.info("正在初始化 CLOB Client...")
 
-        # 校验必要凭证
         cfg = CONFIG.clob
         wallet_cfg = CONFIG.wallet
 
         if not wallet_cfg.private_key:
-            raise RuntimeError("PRIVATE_KEY 未配置, 无法初始化 CLOB Client")
-        if not all([cfg.api_key, cfg.api_secret, cfg.api_passphrase]):
-            raise RuntimeError("L2 API 凭证不完整, 无法初始化 CLOB Client")
+            raise RuntimeError(
+                "PRIVATE_KEY 未配置!\n"
+                "请按照以下步骤获取:\n"
+                "1. 创建新的 MetaMask 钱包 (切勿使用已有主钱包)\n"
+                "2. 导出私钥 (MetaMask → 账户详情 → 导出私钥)\n"
+                "3. 将私钥填入 .env 文件的 PRIVATE_KEY 字段"
+            )
 
-        # 构造 API 凭证
-        api_creds = ApiCreds(
-            api_key=cfg.api_key,
-            api_secret=cfg.api_secret,
-            api_passphrase=cfg.api_passphrase,
-        )
+        # 检查是否有 L2 凭证
+        has_l2_creds = all([cfg.api_key, cfg.api_secret, cfg.api_passphrase])
 
-        # 实例化 ClobClient (链ID=137 → Polygon Mainnet)
-        client = ClobClient(
-            host=cfg.api_url,
-            key=wallet_cfg.private_key,
-            chain_id=wallet_cfg.chain_id,
-            creds=api_creds,
-        )
+        if has_l2_creds:
+            # Level 2: 完整交易能力
+            api_creds = ApiCreds(
+                api_key=cfg.api_key,
+                api_secret=cfg.api_secret,
+                api_passphrase=cfg.api_passphrase,
+            )
+            client = ClobClient(
+                host=cfg.api_url,
+                key=wallet_cfg.private_key,
+                chain_id=wallet_cfg.chain_id,
+                creds=api_creds,
+            )
+            logger.info("CLOB Client 初始化完成 (Level 2 - 完整交易能力)")
+        else:
+            # Level 1: 仅认证, 可用于 create_api_key
+            client = ClobClient(
+                host=cfg.api_url,
+                key=wallet_cfg.private_key,
+                chain_id=wallet_cfg.chain_id,
+            )
+            logger.warning(
+                "CLOB Client 初始化完成 (Level 1 - 仅认证模式)\n"
+                "L2 API 凭证未配置, 无法执行交易。\n"
+                "请运行 python setup_credentials.py 获取 API 凭证\n"
+                "或手动在 .env 中填入 API_KEY, API_SECRET, API_PASSPHRASE"
+            )
 
         cls._instance = client
         cls._initialized = True
-        logger.info("CLOB Client 初始化完成 ✓")
         return cls._instance
 
     @classmethod
