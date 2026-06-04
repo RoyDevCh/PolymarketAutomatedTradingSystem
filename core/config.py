@@ -40,8 +40,8 @@ class GammaConfig:
     """Gamma API 配置"""
     api_url: str = os.getenv("GAMMA_API_URL", "https://gamma-api.polymarket.com")
     poll_interval: int = 300  # 5 分钟轮询间隔 (秒)
-    min_volume: float = 10_000.0  # 最低交易量过滤阈值
-    min_liquidity: float = 5_000.0  # 最低流动性过滤阈值
+    min_volume: float = float(os.getenv("GAMMA_MIN_VOLUME", "1.0"))
+    min_liquidity: float = float(os.getenv("GAMMA_MIN_LIQUIDITY", "1.0"))
 
 
 @dataclass(frozen=True)

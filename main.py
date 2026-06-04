@@ -28,9 +28,30 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
+
+# ============================================================
+# 代理配置: 支持 mihomo/Clash 本地代理
+# 自动从 ~/.proxyrc 加载, 也可通过 .env 的 PROXY_URL 指定
+# ============================================================
+def _load_proxy():
+    proxy_rc = Path.home() / ".proxyrc"
+    if proxy_rc.exists():
+        for line in proxy_rc.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" in line and not line.startswith("#"):
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip()
+                if key.lower().endswith("_proxy") and val:
+                    os.environ.setdefault(key, val)
+
+
+_load_proxy()
 
 import structlog
 

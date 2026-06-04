@@ -13,10 +13,28 @@ Phase 2 测试脚本: 影子系统模式
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# 加载代理配置
+def _load_proxy():
+    proxy_rc = Path.home() / ".proxyrc"
+    if proxy_rc.exists():
+        for line in proxy_rc.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" in line and not line.startswith("#"):
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip()
+                if key.lower().endswith("_proxy") and val:
+                    os.environ.setdefault(key, val)
+
+
+_load_proxy()
 
 import structlog
 

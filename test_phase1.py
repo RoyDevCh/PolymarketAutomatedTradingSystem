@@ -11,11 +11,29 @@ Phase 1 测试脚本: 验证 Gamma API 市场发现功能
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
+
+# 加载代理配置 (mihomo/Clash)
+def _load_proxy():
+    proxy_rc = Path.home() / ".proxyrc"
+    if proxy_rc.exists():
+        for line in proxy_rc.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" in line and not line.startswith("#"):
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip()
+                if key.lower().endswith("_proxy") and val:
+                    os.environ.setdefault(key, val)
+
+
+_load_proxy()
 
 import structlog
 from core.mdg import MarketDataGateway
@@ -101,7 +119,7 @@ async def test_websocket_connectivity():
     test_market = markets[0]
     token_ids = [test_market.yes_token_id, test_market.no_token_id]
 
-    print(f"📡 尝试连接 CLOB WebSocket: {CONFIG.clob.ws_url}")
+    print(f"📡 尝试连接 CLOB WebSocket: {CONFIG.clob.ws_market_url}")
     print(f"   订阅市场: {test_market.question[:50]}")
     print()
 

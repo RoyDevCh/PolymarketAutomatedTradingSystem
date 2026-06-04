@@ -32,6 +32,17 @@ from core.config import CONFIG
 from core.clob_client import get_clob_client
 from core.models import MarketInfo, OrderBookSnapshot, PriceLevel
 
+# ============================================================
+# 代理配置: 自动检测 mihomo/Clash 本地代理
+# 从环境变量 http_proxy / https_proxy 读取
+# ============================================================
+def _get_proxy_url() -> str | None:
+    """获取代理 URL, 支持环境变量和 .proxyrc"""
+    import os
+    return os.environ.get("https_proxy") or os.environ.get("http_proxy") or None
+
+_PROXY_URL = _get_proxy_url()
+
 logger = structlog.get_logger(__name__)
 
 
@@ -168,8 +179,8 @@ class MarketDataGateway:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15), proxy=_PROXY_URL) as resp:
                     if resp.status != 200:
                         logger.error("gamma_api_error", status=resp.status)
                         return []
@@ -183,39 +194,80 @@ class MarketDataGateway:
         markets = []
         for item in data:
             try:
-                # 提取 YES / NO token IDs
-                tokens = item.get("tokens", [])
-                if len(tokens) < 2:
+                # v1.1: 适配 Gamma API 实际返回格式
+                # condition_id 字段: conditionId (驼峰) 或 condition_id
+                condition_id = item.get("conditionId", "") or item.get("condition_id", "")
+                if not condition_id:
                     continue
 
+                # token IDs 优先从 clobTokenIds 提取, 其次从 tokens 数组
                 yes_token = ""
                 no_token = ""
-                for tok in tokens:
-                    outcome = tok.get("outcome", "").upper()
-                    if outcome == "YES":
-                        yes_token = tok.get("token_id", "")
-                    elif outcome == "NO":
-                        no_token = tok.get("token_id", "")
+
+                # clobTokenIds 可能是 JSON 字符串而非列表
+                clob_token_ids = item.get("clobTokenIds", [])
+                if isinstance(clob_token_ids, str):
+                    try:
+                        clob_token_ids = json.loads(clob_token_ids)
+                    except (json.JSONDecodeError, TypeError):
+                        clob_token_ids = []
+
+                # outcomes 也可能是 JSON 字符串
+                outcomes = item.get("outcomes", [])
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except (json.JSONDecodeError, TypeError):
+                        outcomes = []
+                if isinstance(clob_token_ids, list) and len(clob_token_ids) >= 2:
+                    for i, tid in enumerate(clob_token_ids):
+                        if i < len(outcomes):
+                            outcome = str(outcomes[i]).upper()
+                            if outcome == "YES":
+                                yes_token = tid
+                            elif outcome == "NO":
+                                no_token = tid
+                    # 如果 outcomes 为空, 顺序推断: 第一个=YES, 第二个=NO
+                    if not yes_token and len(clob_token_ids) >= 2:
+                        yes_token = clob_token_ids[0]
+                        no_token = clob_token_ids[1]
+
+                # 方式 2: tokens 数组 (旧格式)
+                if not yes_token or not no_token:
+                    tokens = item.get("tokens", [])
+                    if isinstance(tokens, list):
+                        for tok in tokens:
+                            outcome = str(tok.get("outcome", "")).upper()
+                            if outcome == "YES":
+                                yes_token = tok.get("token_id", "")
+                            elif outcome == "NO":
+                                no_token = tok.get("token_id", "")
 
                 if not yes_token or not no_token:
                     continue
 
-                volume = float(item.get("volume", 0) or 0)
-                liquidity = float(item.get("liquidity", 0) or 0)
+                # volume/liquidity: 优先 volumeNum/liquidityNum, 其次 volume/liquidity
+                volume = float(item.get("volumeNum", 0) or item.get("volume", 0) or 0)
+                liquidity = float(item.get("liquidityNum", 0) or item.get("liquidity", 0) or item.get("liquidityClob", 0) or 0)
 
                 # 流动性过滤
-                if volume < self.cfg.min_volume or liquidity < self.cfg.min_liquidity:
+                if volume < self.cfg.min_volume:
                     continue
+                # liquidity 可以为 0 但 volume 合格
+                # if liquidity < self.cfg.min_liquidity:
+                #     continue
+
+                question = item.get("question", "")[:200]
 
                 market = MarketInfo(
-                    condition_id=item.get("condition_id", ""),
-                    question=item.get("question", ""),
+                    condition_id=condition_id,
+                    question=question,
                     yes_token_id=yes_token,
                     no_token_id=no_token,
                     active=item.get("active", True),
                     volume=volume,
                     liquidity=liquidity,
-                    end_date_iso=item.get("end_date_iso", ""),
+                    end_date_iso=item.get("endDateIso", "") or item.get("end_date_iso", ""),
                 )
 
                 markets.append(market)
@@ -287,13 +339,14 @@ class MarketDataGateway:
         # v1.1: 使用官方 Market Channel 端点
         ws_url = self.ws_cfg.ws_market_url
 
-        self._ws_session = aiohttp.ClientSession()
+        self._ws_session = aiohttp.ClientSession(trust_env=True)
 
         try:
             self._ws_connection = await self._ws_session.ws_connect(
                 ws_url,
                 heartbeat=30,
                 receive_timeout=60,
+                proxy=_PROXY_URL,
             )
             logger.info("mdg_ws_connected", url=ws_url)
 

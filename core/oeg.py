@@ -35,6 +35,10 @@ from core.models import (
     TradeSignal,
 )
 
+# 代理配置
+import os
+_PROXY_URL = os.environ.get("https_proxy") or os.environ.get("http_proxy") or None
+
 logger = structlog.get_logger(__name__)
 
 
@@ -166,13 +170,14 @@ class FillTracker:
 
     async def _connect_and_listen(self, condition_ids: list[str]) -> None:
         """建立认证连接并监听事件"""
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(trust_env=True)
 
         try:
             self._ws = await self._session.ws_connect(
                 f"{self.cfg.ws_user_url}",
                 heartbeat=30,
                 receive_timeout=60,
+                proxy=_PROXY_URL,
             )
             logger.info("fill_tracker_ws_connected")
 
