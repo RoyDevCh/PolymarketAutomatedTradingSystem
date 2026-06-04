@@ -366,7 +366,8 @@ class FillTracker:
             )
             if tracker:
                 tracker.status = OrderStatus.CANCELLED
-                self._pending_orders.pop(order_id, None)
+                # 不立即移除 tracker, 让 OEG 通过 _try_complete_arbitrage 处理
+                # 移除时机: OEG 调用 remove_tracker() 或超时清理
 
     def _find_tracker(self, order_id: str, asset_id: str) -> Optional["OrderTracker"]:
         """通过 order_id 或 asset_id 查找追踪器"""
