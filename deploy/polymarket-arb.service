@@ -1,0 +1,38 @@
+[Unit]
+Description=Polymarket Automated Arbitrage Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket-arb
+ExecStart=/opt/polymarket-arb/venv/bin/python main.py
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 环境变量
+EnvironmentFile=/opt/polymarket-arb/.env
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket-arb/db
+PrivateTmp=true
+
+# 资源限制
+LimitNOFILE=65536
+MemoryMax=512M
+CPUQuota=50%
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-arb
+
+[Install]
+WantedBy=multi-user.target

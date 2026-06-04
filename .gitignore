@@ -1,0 +1,47 @@
+# ============================================================
+# Polymarket 自动套利系统 - Git 忽略规则
+# ============================================================
+
+# ---- 密钥与敏感配置 (零容忍) ----
+.env
+*.env.local
+*.env.production
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ---- 虚拟环境 ----
+venv/
+.venv/
+env/
+
+# ---- 数据库 ----
+*.db
+*.sqlite3
+db/*.db
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
+
+# ---- 运行时日志 ----
+logs/
+*.log
+
+# ---- 临时文件 ----
+tmp/
+temp/

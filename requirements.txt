@@ -1,0 +1,31 @@
+# ============================================================
+# Polymarket 自动套利系统 - Python 依赖
+# ============================================================
+
+# ---- 核心异步框架 ----
+aiohttp>=3.9.0
+websockets>=12.0
+
+# ---- Polymarket CLOB SDK ----
+py-clob-client>=0.1.0
+
+# ---- 密码学 & Web3 ----
+eth-account>=0.10.0
+eth-keys>=0.5.0
+web3>=6.0.0
+
+# ---- 数据结构 & 计算 ----
+sortedcontainers>=2.4.0     # 红黑树替代: SortedDict
+numpy>=1.24.0
+
+# ---- 持久化 ----
+aiosqlite>=0.19.0
+
+# ---- 配置管理 ----
+python-dotenv>=1.0.0
+
+# ---- 日志 & 监控 ----
+structlog>=23.2.0
+
+# ---- Phase 4: Telegram ----
+python-telegram-bot>=20.0
