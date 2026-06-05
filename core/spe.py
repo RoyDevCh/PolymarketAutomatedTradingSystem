@@ -328,21 +328,17 @@ class StrategyPricingEngine:
                     imbalance_ratio = total_ask / total_bid if total_bid > 0 else 5.0
 
                     if imbalance_ratio > 3.0:
-                        # 严重卖压: 撤退 5 ticks 避险
-                        skew_ticks = 5
+                        # 严重卖压: 撤退 3 ticks 避险 (从5减到3, 接近前线)
+                        skew_ticks = 3
                         skew_reason = "HIGH_SELL_PRESSURE"
                     elif imbalance_ratio > 2.0:
-                        # 中度卖压: 撤退 3 ticks
-                        skew_ticks = 3
+                        # 中度卖压: 撤退 2 ticks
+                        skew_ticks = 2
                         skew_reason = "MODERATE_SELL_PRESSURE"
-                    elif imbalance_ratio < 0.5:
-                        # 买方强势: 1 tick 足够
-                        skew_ticks = 1
-                        skew_reason = "BUY_DOMINANT"
                     else:
-                        # 均衡: 1-2 ticks
+                        # 默认: 1 tick 逼进 BBO 前线
                         skew_ticks = 1
-                        skew_reason = "BALANCED"
+                        skew_reason = "AT_BBO"
 
                     our_bid_yes = max(0.01, round(best_bid_yes.price - skew_ticks * tick, 2))
                     our_bid_no = max(0.01, round(best_bid_no.price - skew_ticks * tick, 2))

@@ -29,6 +29,9 @@ def _inject_proxy_to_clob_client() -> None:
         logger.warning("No proxy configured for CLOB client.")
         return
 
+    # v1.6: Polymarket blocks order API from HK/TW/US proxies
+    # Now using JP proxy via mihomo Polymarket group (POLY_1271)
+    # All CLOB traffic routes through JP proxy
     logger.info("Injecting proxy to CLOB client: %s...", proxy_url[:30])
     try:
         h._http_client = httpx.Client(
@@ -36,7 +39,7 @@ def _inject_proxy_to_clob_client() -> None:
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
         )
-        logger.info("CLOB client proxy injection successful")
+        logger.info("CLOB client proxy injection successful (JP proxy)")
     except Exception as e:
         logger.error("Failed to inject proxy: %s", e)
 

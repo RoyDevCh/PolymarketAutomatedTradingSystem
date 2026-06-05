@@ -1,0 +1,38 @@
+local unchanged: core/rmc.py
+local unchanged: core/oeg.py
+local unchanged: main.py
+local unchanged: .env
+remote uploaded: core/rmc.py
+remote uploaded: core/oeg.py
+remote uploaded: main.py
+remote patched: .env
+remote uploaded: test_probe_trade.py
+main_start:
+564353 python main.py --debug
+probe_exit=1
+main_log_tail:
+2026-06-05 13:03:14,731 [DEBUG] executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, 'PRAGMA synchronous=NORMAL', [])
+2026-06-05 13:03:14,731 [DEBUG] operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, 'PRAGMA synchronous=NORMAL', []) completed
+2026-06-05 13:03:14,731 [DEBUG] executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, '\n            CREATE TABLE IF NOT EXISTS trade_log (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                timestamp REAL NOT NULL,\n                signal_id TEXT NOT NULL,\n                condition_id TEXT NOT NULL,\n                market_question TEXT,\n                yes_token_id TEXT,\n                no_token_id TEXT,\n                yes_price REAL,\n                no_price REAL,\n                yes_size REAL,\n                no_size REAL,\n                expected_profit REAL,\n                realized_profit REAL,\n                yes_order_id TEXT,\n                no_order_id TEXT,\n                yes_status TEXT,\n                no_status TEXT,\n                yes_fill_price REAL,\n                no_fill_price REAL,\n                yes_filled_size REAL,\n                no_filled_size REAL,\n                slippage_estimate REAL,\n                has_leg_risk INTEGER DEFAULT 0,\n                gas_cost REAL DEFAULT 0.0\n            )\n        ', [])
+2026-06-05 13:03:14,731 [DEBUG] operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, '\n            CREATE TABLE IF NOT EXISTS trade_log (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                timestamp REAL NOT NULL,\n                signal_id TEXT NOT NULL,\n                condition_id TEXT NOT NULL,\n                market_question TEXT,\n                yes_token_id TEXT,\n                no_token_id TEXT,\n                yes_price REAL,\n                no_price REAL,\n                yes_size REAL,\n                no_size REAL,\n                expected_profit REAL,\n                realized_profit REAL,\n                yes_order_id TEXT,\n                no_order_id TEXT,\n                yes_status TEXT,\n                no_status TEXT,\n                yes_fill_price REAL,\n                no_fill_price REAL,\n                yes_filled_size REAL,\n                no_filled_size REAL,\n                slippage_estimate REAL,\n                has_leg_risk INTEGER DEFAULT 0,\n                gas_cost REAL DEFAULT 0.0\n            )\n        ', []) completed
+2026-06-05 13:03:14,731 [DEBUG] executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, '\n            CREATE TABLE IF NOT EXISTS circuit_breaker_log (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                timestamp REAL NOT NULL,\n                breaker_type TEXT NOT NULL,\n                condition_id TEXT,\n                message TEXT,\n                cooldown_until REAL\n            )\n        ', [])
+2026-06-05 13:03:14,732 [DEBUG] operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, '\n            CREATE TABLE IF NOT EXISTS circuit_breaker_log (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                timestamp REAL NOT NULL,\n                breaker_type TEXT NOT NULL,\n                condition_id TEXT,\n                message TEXT,\n                cooldown_until REAL\n            )\n        ', []) completed
+2026-06-05 13:03:14,732 [DEBUG] executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, '\n            CREATE TABLE IF NOT EXISTS signal_stats (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                timestamp REAL NOT NULL,\n                total_signals INTEGER DEFAULT 0,\n                total_arbitrages INTEGER DEFAULT 0,\n                total_profit REAL DEFAULT 0.0,\n                total_leg_risks INTEGER DEFAULT 0,\n                avg_slippage REAL DEFAULT 0.0\n            )\n        ', [])
+2026-06-05 13:03:14,732 [DEBUG] operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, '\n            CREATE TABLE IF NOT EXISTS signal_stats (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                timestamp REAL NOT NULL,\n                total_signals INTEGER DEFAULT 0,\n                total_arbitrages INTEGER DEFAULT 0,\n                total_profit REAL DEFAULT 0.0,\n                total_leg_risks INTEGER DEFAULT 0,\n                avg_slippage REAL DEFAULT 0.0\n            )\n        ', []) completed
+2026-06-05 13:03:14,732 [DEBUG] executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, "\n            CREATE VIEW IF NOT EXISTS v_daily_pnl AS\n            SELECT\n                date(timestamp, 'unixepoch') as trade_date,\n                COUNT(*) as total_trades,\n                SUM(CASE WHEN realized_profit > 0 THEN 1 ELSE 0 END) as winning_trades,\n                SUM(realized_profit) as total_profit,\n                AVG(slippage_estimate) as avg_slippage,\n                SUM(CASE WHEN has_leg_risk = 1 THEN 1 ELSE 0 END) as leg_risks\n            FROM trade_log\n            GROUP BY date(timestamp, 'unixepoch')\n            ORDER BY trade_date DESC\n        ", [])
+2026-06-05 13:03:14,732 [DEBUG] operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x751b1f457e20>, "\n            CREATE VIEW IF NOT EXISTS v_daily_pnl AS\n            SELECT\n                date(timestamp, 'unixepoch') as trade_date,\n                COUNT(*) as total_trades,\n                SUM(CASE WHEN realized_profit > 0 THEN 1 ELSE 0 END) as winning_trades,\n                SUM(realized_profit) as total_profit,\n                AVG(slippage_estimate) as avg_slippage,\n                SUM(CASE WHEN has_leg_risk = 1 THEN 1 ELSE 0 END) as leg_risks\n            FROM trade_log\n            GROUP BY date(timestamp, 'unixepoch')\n            ORDER BY trade_date DESC\n        ", []) completed
+2026-06-05 13:03:14,732 [DEBUG] executing functools.partial(<built-in method commit of sqlite3.Connection object at 0x751b1f457e20>)
+2026-06-05 13:03:14,732 [DEBUG] operation functools.partial(<built-in method commit of sqlite3.Connection object at 0x751b1f457e20>) completed
+[[32m[1minfo     [0m] [1mrmc_db_initialized            [0m [36mpath[0m=[35m/home/roy/polymarket-arb/db/arbitrage.db[0m
+[[32m[1minfo     [0m] [1m[INIT] ? Gamma API ?... [0m
+[[32m[1minfo     [0m] [1mmarket_discovery_complete     [0m [36mfiltered[0m=[35m73[0m [36mtotal[0m=[35m100[0m
+[[32m[1minfo     [0m] [1m[INIT] ? 73 ?            [0m
+[[32m[1minfo     [0m] [1m[INIT] ? 4 ?            [0m
+[[32m[1minfo     [0m] [1moeg_execution_loop_started    [0m
+[[32m[1minfo     [0m] [1mfill_tracker_ws_connected     [0m
+[[32m[1minfo     [0m] [1mfill_tracker_authenticated    [0m [36mmarkets[0m=[35m0[0m
+probe_log_tail:
+Traceback (most recent call last):
+  File "/home/roy/polymarket-arb/test_probe_trade.py", line 16, in <module>
+    from client import PolymarketClobClient
+ModuleNotFoundError: No module named 'client'

@@ -1,0 +1,3 @@
+import inspect
+from py_builder_relayer_client.builder.deposit_wallet import build_deposit_wallet_batch_request
+print(inspect.getsource(build_deposit_wallet_batch_request))
