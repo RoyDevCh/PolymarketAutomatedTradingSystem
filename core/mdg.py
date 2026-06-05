@@ -407,6 +407,8 @@ class MarketDataGateway:
         """
         v1.1: 重连后通过 REST API 拉取初始快照
         确保增量更新不会基于过时的订单簿
+        
+        v1.3: 适配 V2 SDK dict 返回格式
         """
         client = None
         try:
@@ -419,16 +421,23 @@ class MarketDataGateway:
             try:
                 book = client.get_order_book(token_id)
                 if book and token_id in self._mirrors:
-                    asks_raw = []
-                    bids_raw = []
-                    if book.asks:
-                        asks_raw = [{"price": a.price, "size": a.size} for a in book.asks]
-                    if book.bids:
-                        bids_raw = [{"price": b.price, "size": b.size} for b in book.bids]
-                    self._mirrors[token_id].apply_snapshot(asks=asks_raw, bids=bids_raw)
+                    # V2 SDK returns dict, not object with .asks/.bids
+                    if isinstance(book, dict):
+                        asks_raw = book.get("asks", []) or []
+                        bids_raw = book.get("bids", []) or []
+                    else:
+                        asks_raw = book.asks if hasattr(book, "asks") else []
+                        bids_raw = book.bids if hasattr(book, "bids") else []
+                    asks = [{"price": float(a.get("price", 0) if isinstance(a, dict) else getattr(a, "price", 0)),
+                             "size": float(a.get("size", 0) if isinstance(a, dict) else getattr(a, "size", 0))}
+                            for a in (asks_raw or [])]
+                    bids = [{"price": float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0)),
+                             "size": float(b.get("size", 0) if isinstance(b, dict) else getattr(b, "size", 0))}
+                            for b in (bids_raw or [])]
+                    self._mirrors[token_id].apply_snapshot(asks=asks, bids=bids)
                     logger.debug("mdg_rest_snapshot_loaded", token_id=token_id[:16])
             except Exception as e:
-                logger.warning("mdg_rest_snapshot_error", token_id=token_id[:16], error=str(e))
+                logger.warning("mdg_rest_snapshot_error", token_id=token_id[:16], error=str(e)[:80])
 
     async def _handle_ws_message(self, raw_data: str) -> None:
         """
@@ -444,6 +453,18 @@ class MarketDataGateway:
 
         # 归一化: 无论是对象还是数组, 都转为事件列表
         events = parsed if isinstance(parsed, list) else [parsed]
+
+        # v1.3: 数据流确认 (前 10 次 INFO, 后续每 500 次)
+        if not hasattr(self, '_ws_event_count'):
+            self._ws_event_count = 0
+        self._ws_event_count += len(events)
+        if self._ws_event_count <= 10 or self._ws_event_count % 500 == 0:
+            ev_types = [d.get('event_type', d.get('type', '?')) for d in events[:3]]
+            logger.info(
+                'mdg_ws_event',
+                types=ev_types,
+                total=self._ws_event_count,
+            )
 
         for data in events:
             event_type = data.get("event_type", data.get("type", ""))
@@ -600,6 +621,7 @@ class MarketDataGateway:
 
     async def start_market_discovery_loop(self) -> None:
         """定期发现市场的后台任务"""
+        self._running = True  # 启动主循环
         while self._running:
             markets = await self.discover_markets()
             if markets:

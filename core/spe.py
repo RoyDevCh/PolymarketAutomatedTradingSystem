@@ -77,28 +77,45 @@ class StrategyPricingEngine:
         }
 
     def on_orderbook_update(self, snapshot: OrderBookSnapshot) -> None:
-        """
-        MDG 回调: 收到订单簿快照时触发
-        
-        流程:
-        1. 更新本地缓存
-        2. 查找对应的另一侧 (YES↔NO) 订单簿
-        3. 执行套利计算
-        4. 满足条件则生成 TradeSignal
-        """
-        # 更新缓存
+        """MDG callback: orderbook snapshot received. v1.3 debug logging."""
+        # v1.3 data flow debug
+        if not hasattr(self, '_obu_count'):
+            self._obu_count = 0
+        self._obu_count += 1
+        if self._obu_count <= 5:
+            logger.info(
+                "spe_obu_debug",
+                token_id=snapshot.token_id[:16],
+                condition_id=(snapshot.condition_id or "")[:16],
+                has_asks=bool(snapshot.asks),
+                has_bids=bool(snapshot.bids),
+                registered_cids=len(self._condition_to_tokens),
+            )
+
+        # Update cache
         self._orderbooks[snapshot.token_id] = snapshot
 
-        # 查找 condition_id
+        # Find condition_id
         condition_id = snapshot.condition_id
         if not condition_id:
-            # 尝试通过遍历查找
             condition_id = self._find_condition(snapshot.token_id)
             if not condition_id:
+                if self._obu_count <= 3:
+                    logger.warning(
+                        "spe_obu_no_condition",
+                        token_id=snapshot.token_id[:16],
+                        registered=len(self._condition_to_tokens),
+                    )
                 return
 
         tokens = self._condition_to_tokens.get(condition_id)
         if not tokens:
+            if self._obu_count <= 3:
+                logger.warning(
+                    "spe_obu_no_tokens",
+                    condition_id=condition_id[:20],
+                    registered=len(self._condition_to_tokens),
+                )
             return
 
         # 判断当前是 YES 还是 NO
@@ -183,7 +200,7 @@ class StrategyPricingEngine:
             
             # 低深度预警
             if yes_depth < 3 or no_depth < 3:
-                logger.debug(
+                logger.info(
                     "spe_low_depth",
                     condition_id=condition_id[:16],
                     yes_depth=yes_depth,
@@ -240,7 +257,7 @@ class StrategyPricingEngine:
                 # 理论最佳利润 (best ask 成交)
                 best_ask_cost = best_ask_yes.price + best_ask_no.price
 
-                logger.debug(
+                logger.info(
                     "spe_arbitrage_calc",
                     condition_id=condition_id[:16],
                     vwap_yes=f"{vwap_yes:.4f}",
@@ -254,6 +271,15 @@ class StrategyPricingEngine:
                 )
 
                 if total_net_profit < self.cfg.min_profit_threshold:
+                    logger.info(
+                        "spe_below_threshold",
+                        condition_id=condition_id[:16],
+                        net_profit=f"${total_net_profit:.4f}",
+                        threshold=f"${self.cfg.min_profit_threshold}",
+                        bbo_spread=f"{theoretical_spread:.4f}",
+                        vwap_yes=f"{vwap_yes:.4f}",
+                        vwap_no=f"{vwap_no:.4f}",
+                    )
                     return
 
                 self._generate_signal(
@@ -285,7 +311,7 @@ class StrategyPricingEngine:
                 potential_spread = implied_no_ask - best_ask_yes.price
                 # 这需要 maker 侧策略, 暂不实现
                 # 但记录诊断
-                logger.debug(
+                logger.info(
                     "spe_cross_arb_detected",
                     condition_id=condition_id[:16],
                     yes_ask=best_ask_yes.price,
@@ -300,7 +326,7 @@ class StrategyPricingEngine:
             implied_yes_ask = 1.0 - best_bid_yes.price
             if best_ask_no.price < implied_yes_ask:
                 potential_spread = implied_yes_ask - best_ask_no.price
-                logger.debug(
+                logger.info(
                     "spe_cross_arb_detected",
                     condition_id=condition_id[:16],
                     no_ask=best_ask_no.price,

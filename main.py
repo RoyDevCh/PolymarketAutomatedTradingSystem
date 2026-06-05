@@ -135,6 +135,19 @@ class ArbitrageEngine:
         """MDG 回调: 收到订单簿快照, 推入 SPE 输入队列"""
         try:
             self.snapshot_queue.put_nowait(snapshot)
+            # v1.3: 确认数据流 (每 100 次记录一次)
+            if not hasattr(self, '_snapshot_count'):
+                self._snapshot_count = 0
+            self._snapshot_count += 1
+            if self._snapshot_count <= 5 or self._snapshot_count % 1000 == 0:
+                logger.info(
+                    "snapshot_to_spe",
+                    token_id=snapshot.token_id[:16],
+                    condition_id=snapshot.condition_id[:16] if snapshot.condition_id else "NONE",
+                    asks=len(snapshot.asks),
+                    bids=len(snapshot.bids),
+                    total=self._snapshot_count,
+                )
         except asyncio.QueueFull:
             logger.warning("snapshot_queue_full, dropping update")
 

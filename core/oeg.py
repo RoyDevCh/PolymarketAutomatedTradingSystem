@@ -682,6 +682,38 @@ class OrderExecutionGateway:
         )
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # ☁️ DRY RUN: 只记录, 不下单
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if CONFIG.flags.dry_run:
+            logger.info(
+                "DRY_RUN_SIGNAL",
+                signal_id=signal.signal_id[:8],
+                question=signal.market_question[:50],
+                vwap_yes=f"{signal.yes_price:.4f}",
+                vwap_no=f"{signal.no_price:.4f}",
+                size=signal.yes_size,
+                expected_profit=f"${signal.expected_profit:.4f}",
+                note="order NOT placed (dry run)",
+            )
+            result.yes_result = ExecutionResult(
+                signal_id=signal.signal_id,
+                token_id=signal.yes_token_id,
+                side=Side.YES,
+                status=OrderStatus.CANCELLED,
+            )
+            result.no_result = ExecutionResult(
+                signal_id=signal.signal_id,
+                token_id=signal.no_token_id,
+                side=Side.NO,
+                status=OrderStatus.CANCELLED,
+            )
+            result.is_complete = True
+            # 仍然回调 RMC 以记录到 trade_log (status=CANCELLED)
+            if self._result_callback:
+                await self._result_callback(result)
+            return result
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # ⚡ 核心: 并发下单, 消除 Leg Risk ⚡
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         try:

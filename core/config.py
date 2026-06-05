@@ -48,6 +48,12 @@ class GammaConfig:
 
 
 @dataclass(frozen=True)
+class SystemFlags:
+    """系统运行标志"""
+    dry_run: bool = field(default_factory=lambda: os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes"))
+
+
+@dataclass(frozen=True)
 class TradingConfig:
     """交易参数配置"""
     max_trade_size: float = float(os.getenv("MAX_TRADE_SIZE", "2.0"))
@@ -94,6 +100,7 @@ class SystemConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     phase3: Phase3Config = field(default_factory=Phase3Config)
+    flags: SystemFlags = field(default_factory=SystemFlags)
 
     # 数据库路径
     db_path: str = str(Path(__file__).resolve().parent.parent / "db" / "arbitrage.db")
