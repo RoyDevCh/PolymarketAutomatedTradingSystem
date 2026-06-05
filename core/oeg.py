@@ -624,6 +624,15 @@ class OrderExecutionGateway:
             name="fill_tracker",
         )
 
+        # 在 DRY_RUN 模式下启动虚拟成交追踪
+        self._virtual_orders = {}
+        if CONFIG.flags.dry_run:
+            asyncio.create_task(
+                self._virtual_fill_tracker_loop(),
+                name="virtual_fill_tracker",
+            )
+            logger.info("oeg_virtual_fill_tracker_started")
+
         while True:
             try:
                 signal: TradeSignal = await signal_queue.get()
@@ -637,11 +646,27 @@ class OrderExecutionGateway:
                     )
                     continue
 
+                # ── 并发敞口上限检查 (防止资金碎片化 + 单腿风险) ──
+                active_conditions = set()
+                for pending_result in self._pending.values():
+                    if not pending_result.is_complete:  # still live
+                        active_conditions.add(pending_result.condition_id)
+                max_concurrent = CONFIG.trading.max_concurrent_markets
+                if len(active_conditions) >= max_concurrent:
+                    logger.info(
+                        "oeg_concurrent_cap_reached",
+                        active=len(active_conditions),
+                        cap=max_concurrent,
+                        condition_id=signal.condition_id[:16],
+                    )
+                    continue
+
                 logger.info(
                     "oeg_signal_received",
                     signal_id=signal.signal_id[:8],
                     question=signal.market_question[:50],
                     expected_profit=f"${signal.expected_profit:.4f}",
+                    active_conditions=len(active_conditions),
                 )
 
                 # 动态添加 condition_id 到 FillTracker 订阅
@@ -682,7 +707,7 @@ class OrderExecutionGateway:
         )
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # ☁️ DRY RUN: 只记录, 不下单
+        # ☁️ DRY RUN: 虚拟挂单 + 监控被动成交率
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         if CONFIG.flags.dry_run:
             logger.info(
@@ -693,7 +718,8 @@ class OrderExecutionGateway:
                 vwap_no=f"{signal.no_price:.4f}",
                 size=signal.yes_size,
                 expected_profit=f"${signal.expected_profit:.4f}",
-                note="order NOT placed (dry run)",
+                order_type=signal.order_type,
+                note="virtual order placed (dry run)",
             )
             result.yes_result = ExecutionResult(
                 signal_id=signal.signal_id,
@@ -708,6 +734,20 @@ class OrderExecutionGateway:
                 status=OrderStatus.CANCELLED,
             )
             result.is_complete = True
+            # ── 虚拟成交追踪: 记录挂单, 稍后检查是否会被吃 ──
+            self._virtual_orders = getattr(self, '_virtual_orders', {})
+            self._virtual_orders[signal.signal_id] = {
+                "condition_id": signal.condition_id,
+                "yes_token": signal.yes_token_id,
+                "no_token": signal.no_token_id,
+                "bid_yes": signal.yes_price,
+                "bid_no": signal.no_price,
+                "size": signal.yes_size,
+                "placed_at": time.time(),
+                "filled_yes": False,
+                "filled_no": False,
+                "adverse_selection": False,  # True if filled quickly = bad news
+            }
             # 仍然回调 RMC 以记录到 trade_log (status=CANCELLED)
             if self._result_callback:
                 await self._result_callback(result)
@@ -976,3 +1016,123 @@ class OrderExecutionGateway:
     def get_stats(self) -> dict:
         """获取执行统计"""
         return self._stats.copy()
+
+    # ============================================================
+    # 虚拟成交追踪 (DRY_RUN 模式专用)
+    # ============================================================
+    async def _virtual_fill_tracker_loop(self) -> None:
+        """
+        DRY_RUN 模式下, 追踪虚拟挂单是否会被真实盘口吃掉。
+        
+        逻辑: 每 10 秒拉取虚拟订单对应 token 的订单簿, 检查:
+        - 如果 ask 价格降到 ≤ 我们的 bid, 说明我们的挂单会被吃 (FILLED)
+        - 如果在 5 秒内就被吃, 标记 adverse_selection (逆向选择风险)
+        - 如果 5 分钟内都没被吃, 虚拟订单过期
+        """
+        client = self._get_client()
+        while True:
+            try:
+                await asyncio.sleep(10)  # check every 10s
+                now = time.time()
+                expired = []
+                active_count = len(self._virtual_orders)
+                if active_count > 0:
+                    logger.debug("virtual_fill_tracker_check", active=active_count)
+                
+                for sig_id, vo in list(self._virtual_orders.items()):
+                    age = now - vo["placed_at"]
+                    
+                    # 过期: 5 分钟未成交 → 移除
+                    if age > 300:
+                        logger.info(
+                            "virtual_order_expired_unfilled",
+                            signal_id=sig_id[:8],
+                            age=f"{age:.0f}s",
+                            filled_yes=vo["filled_yes"],
+                            filled_no=vo["filled_no"],
+                            note="no adverse selection - safe to place",
+                        )
+                        expired.append(sig_id)
+                        continue
+                    
+                    # 检查 YES 腿: ask 是否降到我们的 bid
+                    if not vo["filled_yes"]:
+                        try:
+                            book = await asyncio.to_thread(client.get_order_book, vo["yes_token"])
+                            best_ask = None
+                            if isinstance(book, dict):
+                                asks = book.get("asks", [])
+                                if asks and isinstance(asks[0], dict):
+                                    best_ask = float(asks[0]["price"])
+                            if best_ask is not None and best_ask <= vo["bid_yes"]:
+                                vo["filled_yes"] = True
+                                fill_time = now - vo["placed_at"]
+                                vo["adverse_selection"] = fill_time < 5.0
+                                logger.info(
+                                    "virtual_fill_YES",
+                                    signal_id=sig_id[:8],
+                                    bid_yes=vo["bid_yes"],
+                                    ask_now=best_ask,
+                                    fill_time=f"{fill_time:.1f}s",
+                                    adverse=vo["adverse_selection"],
+                                )
+                        except Exception:
+                            pass
+                    
+                    # 检查 NO 腿
+                    if not vo["filled_no"]:
+                        try:
+                            book = await asyncio.to_thread(client.get_order_book, vo["no_token"])
+                            best_ask = None
+                            if isinstance(book, dict):
+                                asks = book.get("asks", [])
+                                if asks and isinstance(asks[0], dict):
+                                    best_ask = float(asks[0]["price"])
+                            if best_ask is not None and best_ask <= vo["bid_no"]:
+                                vo["filled_no"] = True
+                                fill_time = now - vo["placed_at"]
+                                if fill_time < 5.0:
+                                    vo["adverse_selection"] = True
+                                logger.info(
+                                    "virtual_fill_NO",
+                                    signal_id=sig_id[:8],
+                                    bid_no=vo["bid_no"],
+                                    ask_now=best_ask,
+                                    fill_time=f"{fill_time:.1f}s",
+                                    adverse=fill_time < 5.0,
+                                )
+                        except Exception:
+                            pass
+                    
+                    # 双腿都成交 → 记录结果
+                    if vo["filled_yes"] and vo["filled_no"]:
+                        profit = (1.0 - vo["bid_yes"] - vo["bid_no"]) * vo["size"]
+                        logger.info(
+                            "virtual_fill_COMPLETE",
+                            signal_id=sig_id[:8],
+                            profit=f"${profit:.4f}",
+                            adverse_selection=vo["adverse_selection"],
+                            age=f"{now - vo['placed_at']:.1f}s",
+                        )
+                        self._stats.setdefault("virtual_fills", 0)
+                        self._stats["virtual_fills"] += 1
+                        if vo["adverse_selection"]:
+                            self._stats.setdefault("virtual_adverse_selections", 0)
+                            self._stats["virtual_adverse_selections"] += 1
+                        expired.append(sig_id)
+                
+                # 清除过期/完成的订单
+                for sig_id in expired:
+                    self._virtual_orders.pop(sig_id, None)
+                    
+                # 日志汇总
+                active = len(self._virtual_orders)
+                if active > 0:
+                    self._stats.setdefault("virtual_orders_active", 0)
+                    self._stats["virtual_orders_active"] = active
+                    
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("virtual_fill_tracker_error: %s", e)
+                await asyncio.sleep(30)

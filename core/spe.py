@@ -322,8 +322,10 @@ class StrategyPricingEngine:
                     if our_bid_sum > 0 and our_bid_sum < 1.0:
                         profit_per_share = 1.0 - our_bid_sum
                         budget = self.cfg.max_trade_size
-                        size = max(5.0, round(budget / our_bid_sum, 2)) if our_bid_sum > 0 else 0
-                        total_profit = profit_per_share * size
+                        min_shares = self.cfg.min_shares_per_leg
+                        size = max(min_shares, round(budget / our_bid_sum, 2)) if our_bid_sum > 0 else 0
+                        actual_cost = our_bid_sum * size  # may exceed MAX_TRADE_SIZE to meet min shares
+                        total_profit = profit_per_share * size  # = (1.0 - our_bid_sum) * size
                         if total_profit >= self.cfg.min_profit_threshold:
                             logger.info(
                                 "spe_maker_arb_detected",
@@ -396,7 +398,11 @@ class StrategyPricingEngine:
     ) -> None:
         """生成 TradeSignal 并推入执行队列"""
         now = time.time()
-        signal_key = f"{condition_id}:{vwap_yes:.4f}:{vwap_no:.4f}"
+        # Maker signals: dedup by condition_id only (price drifts, don't use price in key)
+        if signal_type == SignalType.MAKER_ARB:
+            signal_key = f"maker:{condition_id}"
+        else:
+            signal_key = f"{condition_id}:{vwap_yes:.4f}:{vwap_no:.4f}"
         last_sent = self._recent_signals.get(signal_key, 0)
         if now - last_sent < self._signal_dedup_window:
             return

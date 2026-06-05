@@ -71,6 +71,13 @@ def build_heartbeat_message(stats: dict[str, Any]) -> str:
     maker_signals = stats.get("maker_signals_today", 0)
     if maker_signals:
         lines.append(f"Maker signals today: {maker_signals}")
+    virtual_fills = stats.get("virtual_fills", 0)
+    virtual_adverse = stats.get("virtual_adverse_selections", 0)
+    if virtual_fills:
+        lines.append(f"Virtual fills: {virtual_fills} (adverse: {virtual_adverse})")
+    virtual_active = stats.get("virtual_orders_active", 0)
+    if virtual_active:
+        lines.append(f"Virtual orders active: {virtual_active}")
     oeg = stats.get("oeg")
     rmc = stats.get("rmc")
     if oeg:

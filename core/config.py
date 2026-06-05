@@ -60,6 +60,9 @@ class TradingConfig:
     min_profit_threshold: float = float(os.getenv("MIN_PROFIT_THRESHOLD", "0.005"))
     max_slippage_pct: float = float(os.getenv("MAX_SLIPPAGE_PCT", "0.5")) / 100.0
     order_type: str = "GTC"
+    # ── Maker 策略约束 ──
+    max_concurrent_markets: int = int(os.getenv("MAX_CONCURRENT_MARKETS", "2"))
+    min_shares_per_leg: int = int(os.getenv("MIN_SHARES_PER_LEG", "5"))  # Polymarket 最低 5 股
 
 
 @dataclass(frozen=True)
