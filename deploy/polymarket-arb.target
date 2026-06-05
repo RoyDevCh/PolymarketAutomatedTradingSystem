@@ -1,0 +1,9 @@
+# Polymarket 微服务 - systemd target
+# 统一管理所有微服务: start/stop/restart 全部
+[Unit]
+Description=Polymarket Arbitrage System (microservices)
+After=network-online.target mihomo.service
+Wants=network-online.target mihomo.service
+
+[Install]
+WantedBy=multi-user.target

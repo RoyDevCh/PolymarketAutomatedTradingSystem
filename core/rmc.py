@@ -566,3 +566,61 @@ class RiskManagementCenter:
             ).isoformat()
         out["db_open"] = bool(self._db)
         return out
+
+    async def on_trade_signal_from_bus(self, result: dict) -> None:
+        """Process trade result from message bus (microservice mode).
+
+        Takes a dict from result_queue and records it to trade_log.
+        """
+        try:
+            signal_id = result.get("signal_id", "unknown")
+            condition_id = result.get("condition_id", "")
+            realized_profit = result.get("realized_profit", 0)
+
+            # Record to trade_log
+            if self._db:
+                await self._db.execute(
+                    """INSERT OR IGNORE INTO trade_log
+                       (timestamp, signal_id, condition_id, market_question,
+                        yes_token_id, no_token_id, yes_price, no_price,
+                        yes_size, no_size, expected_profit, realized_profit,
+                        yes_order_id, no_order_id, yes_status, no_status,
+                        yes_fill_price, no_fill_price, yes_filled_size, no_filled_size,
+                        slippage_estimate, has_leg_risk)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?)""",
+                    (
+                        result.get("timestamp", time.time()),
+                        signal_id,
+                        condition_id,
+                        result.get("market_question", ""),
+                        result.get("yes_token_id", ""),
+                        result.get("no_token_id", ""),
+                        result.get("yes_price", 0),
+                        result.get("no_price", 0),
+                        result.get("yes_size", 0),
+                        result.get("no_size", 0),
+                        result.get("expected_profit", 0),
+                        realized_profit,
+                        result.get("yes_order_id", ""),
+                        result.get("no_order_id", ""),
+                        str(result.get("yes_status", "UNKNOWN")),
+                        str(result.get("no_status", "UNKNOWN")),
+                        result.get("yes_fill_price", 0),
+                        result.get("no_fill_price", 0),
+                        result.get("yes_filled_size", 0),
+                        result.get("no_filled_size", 0),
+                        result.get("slippage_estimate", 0),
+                        1 if result.get("has_leg_risk", False) else 0,
+                    ),
+                )
+                await self._db.commit()
+
+            logger.info(
+                "rmc_bus_result_recorded",
+                signal_id=signal_id[:8],
+                condition_id=condition_id[:16],
+                profit=f"${realized_profit:.4f}",
+            )
+        except Exception as e:
+            logger.error("rmc_bus_result_error", error=str(e))

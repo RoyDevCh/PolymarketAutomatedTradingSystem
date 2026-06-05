@@ -1,0 +1,25 @@
+# Polymarket 微服务 - SPE (策略引擎)
+# 独立进程, 重启不影响 MDG/OEG/RMC
+[Unit]
+Description=Polymarket SPE - Strategy Pricing Engine
+After=polymarket-mdg.service
+Wants=polymarket-mdg.service
+PartOf=polymarket-arb.target
+
+[Service]
+Type=simple
+User=roy
+WorkingDirectory=/home/roy/polymarket-arb
+EnvironmentFile=-/home/roy/polymarket-arb/.env
+Environment=HTTP_PROXY=http://127.0.0.1:7890
+Environment=HTTPS_PROXY=http://127.0.0.1:7890
+Environment=ALL_PROXY=socks5://127.0.0.1:7890
+Environment=NO_PROXY=localhost,127.0.0.1,192.168.0.0/16
+ExecStart=/home/roy/polymarket-arb/venv/bin/python /home/roy/polymarket-arb/services/spe_service.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=polymarket-arb.target

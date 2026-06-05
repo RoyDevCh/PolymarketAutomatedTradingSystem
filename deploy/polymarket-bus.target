@@ -1,0 +1,8 @@
+# Polymarket 消息总线初始化目标
+[Unit]
+Description=Polymarket Message Bus Target (DB init)
+After=network-online.target
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target
