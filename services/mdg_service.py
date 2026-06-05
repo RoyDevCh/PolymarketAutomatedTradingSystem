@@ -8,8 +8,8 @@ systemd: polymarket-mdg.service
 """
 
 import asyncio
+import logging
 import os
-import sys
 import time
 import signal as sig
 import structlog
@@ -59,11 +59,19 @@ class MDGService:
         self.mdg = MarketDataGateway(snapshot_callback=self._on_snapshot)
         self._running = False
         self._started_at = time.time()
+        self._snapshot_count = 0
     
     def _on_snapshot(self, snapshot) -> None:
         """将订单簿快照推送到消息总线"""
         import json
         try:
+            self._snapshot_count += 1
+            if self._snapshot_count <= 5 or self._snapshot_count % 1000 == 0:
+                logger.info(
+                    "snapshot_pushed",
+                    token_id=snapshot.token_id[:16],
+                    total=self._snapshot_count,
+                )
             self.bus.push_snapshot(
                 token_id=snapshot.token_id,
                 condition_id=snapshot.condition_id,
@@ -84,12 +92,10 @@ class MDGService:
         self._running = True
         pid = os.getpid()
         
-        # 获取服务锁
         if not self.bus.acquire_lock("mdg", pid):
             logger.error("MDG 服务锁已被占用, 退出")
             return
         
-        # 发现市场
         markets = await self.mdg.discover_markets()
         if not markets:
             logger.error("未发现任何活跃市场")
@@ -98,7 +104,6 @@ class MDGService:
         
         logger.info(f"MDG 发现 {len(markets)} 个市场")
         
-        # 启动 MDG 任务
         tasks = [
             asyncio.create_task(self.mdg.start_market_discovery_loop(), name="mdg_discovery"),
             asyncio.create_task(self._heartbeat_loop(pid), name="mdg_heartbeat"),
@@ -114,7 +119,6 @@ class MDGService:
             logger.info("MDG 服务已关闭")
     
     async def _heartbeat_loop(self, pid: int) -> None:
-        """定期心跳和服务锁续期"""
         while self._running:
             self.bus.heartbeat("mdg", pid)
             await asyncio.sleep(30)
@@ -126,10 +130,6 @@ class MDGService:
 
 def main():
     service = MDGService()
-    loop = asyncio.get_running_loop()
-    for s in (sig.SIGINT, sig.SIGTERM):
-        loop.add_signal_handler(s, lambda: asyncio.create_task(service.stop()))
-    
     asyncio.run(service.start())
 
 

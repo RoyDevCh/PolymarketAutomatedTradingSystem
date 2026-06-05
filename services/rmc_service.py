@@ -1,22 +1,17 @@
 """
 Polymarket 微服务入口: RMC (风控中心) + Heartbeat + Phase3
 
-独立进程运行, 从消息总线消费执行结果, 记录到 DB, 定期维护。
-同时负责 Telegram 心跳和 Phase3 通知。
-
 systemd: polymarket-rmc.service
 """
 
 import asyncio
+import logging
 import os
-import sys
 import time
 import signal as sig
 import structlog
-import logging
 from pathlib import Path
 
-# 代理配置
 def _load_proxy():
     proxy_rc = Path.home() / ".proxyrc"
     if proxy_rc.exists():
@@ -73,13 +68,11 @@ class RMCService:
             logger.error("RMC 服务锁已被占用, 退出")
             return
         
-        # 初始化数据库
         await self.rmc.init_db()
         
-        # 启动所有任务
         tasks = [
             asyncio.create_task(self._result_loop(pid), name="rmc_result_consumer"),
-            asyncio.create_task(self._maintenance_loop(pid), name="rmc_maintenance"),
+            asyncio.create_task(self._maintenance_loop(), name="rmc_maintenance"),
             asyncio.create_task(self._cleanup_loop(pid), name="rmc_cleanup"),
             asyncio.create_task(
                 telegram_heartbeat_loop(self._collect_stats, started_at=self._started_at),
@@ -110,7 +103,6 @@ class RMCService:
                 results = self.bus.poll_results(limit=50, max_age=3600.0)
                 
                 for result in results:
-                    # 记录到 trade_log (通过 RMC)
                     try:
                         await self.rmc.on_trade_signal_from_bus(result)
                     except Exception as e:
@@ -126,7 +118,7 @@ class RMCService:
                 logger.error("rmc_result_error", error=str(e))
                 await asyncio.sleep(2.0)
     
-    async def _maintenance_loop(self, pid: int) -> None:
+    async def _maintenance_loop(self) -> None:
         """定期维护 (RMC 内部)"""
         try:
             await self.rmc.maintenance_loop()
@@ -140,7 +132,7 @@ class RMCService:
                 result = self.bus.cleanup(max_age_hours=24.0)
                 if any(v > 0 for v in result.values()):
                     logger.info("queue_cleanup", **result)
-                await asyncio.sleep(3600)  # 每小时清理一次
+                await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -154,7 +146,6 @@ class RMCService:
             "queue_depth": self.bus.queue_depth(),
             "uptime_hours": (time.time() - self._started_at) / 3600,
         }
-        # 添加 CLOB 余额
         try:
             from core.clob_client import get_collateral_balance_usd, get_clob_client
             client = get_clob_client()
@@ -170,10 +161,6 @@ class RMCService:
 
 def main():
     service = RMCService()
-    loop = asyncio.get_running_loop()
-    for s in (sig.SIGINT, sig.SIGTERM):
-        loop.add_signal_handler(s, lambda: asyncio.create_task(service.stop()))
-    
     asyncio.run(service.start())
 
 

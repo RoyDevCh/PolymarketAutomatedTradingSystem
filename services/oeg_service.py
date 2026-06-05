@@ -2,21 +2,18 @@
 Polymarket 微服务入口: OEG (订单执行网关)
 
 独立进程运行, 从消息总线消费交易信号, 执行下单。
-重启此服务不影响 MDG/SPE (信号保存在 DB 中不会丢失)。
 
 systemd: polymarket-oeg.service
 """
 
 import asyncio
+import logging
 import os
-import sys
 import time
 import signal as sig
 import structlog
-import logging
 from pathlib import Path
 
-# 代理配置
 def _load_proxy():
     proxy_rc = Path.home() / ".proxyrc"
     if proxy_rc.exists():
@@ -35,7 +32,7 @@ _load_proxy()
 from core.config import CONFIG
 from core.oeg import OrderExecutionGateway
 from core.message_bus import get_bus
-from core.models import TradeSignal, Side
+from core.models import TradeSignal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 structlog.configure(
@@ -96,7 +93,6 @@ class OEGService:
             logger.error("push_result_error", error=str(e))
     
     def _on_circuit_breaker(self, condition_id: str) -> None:
-        """熔断回调"""
         logger.warning("circuit_breaker_triggered", condition_id=condition_id[:16])
         self.oeg.disable_market(condition_id)
     
@@ -110,9 +106,6 @@ class OEGService:
             logger.error("OEG 服务锁已被占用, 退出")
             return
         
-        # 初始化 OEG (需要 CLOB client)
-        # OEG internally creates CLOB client on first use
-        
         try:
             if self.dry_run:
                 await self._dry_run_loop(pid)
@@ -125,8 +118,7 @@ class OEGService:
             logger.info("OEG 服务已关闭")
     
     async def _execution_loop(self, pid: int) -> None:
-        """实盘模式: 从消息总线拉取信号并执行"""
-        # 创建信号队列供 OEG 内部消费
+        """实盘模式: 从消息总线拉取信号并通过 OEG 执行"""
         signal_queue = asyncio.Queue(maxsize=100)
         
         # 启动 OEG 内部执行循环
@@ -135,7 +127,6 @@ class OEGService:
             name="oeg_executor",
         )
         
-        # 轮询消息总线
         while self._running:
             try:
                 signals = self.bus.poll_signals(limit=10, max_age=300.0)
@@ -186,7 +177,7 @@ class OEGService:
             pass
     
     async def _dry_run_loop(self, pid: int) -> None:
-        """影子模式: 只消费信号并记录, 不执行真实下单"""
+        """影子模式: 只消费信号并记录"""
         logger.info("OEG 影子模式 (DRY RUN)")
         
         while self._running:
@@ -203,13 +194,12 @@ class OEGService:
                         strategy=sig_data.get("strategy", "maker"),
                     )
                     
-                    # 推送虚拟结果
                     self.bus.push_result(
                         signal_id=sig_data["signal_id"],
                         condition_id=sig_data["condition_id"],
                         yes_status="DRY_RUN",
                         no_status="DRY_RUN",
-                        expected_profit=sig_data["expected_profit"],
+                        realized_profit=sig_data.get("expected_profit", 0),
                     )
                 
                 self.bus.heartbeat("oeg", pid)
@@ -231,10 +221,6 @@ class OEGService:
 
 def main():
     service = OEGService()
-    loop = asyncio.get_running_loop()
-    for s in (sig.SIGINT, sig.SIGTERM):
-        loop.add_signal_handler(s, lambda: asyncio.create_task(service.stop()))
-    
     asyncio.run(service.start())
 
 
