@@ -626,6 +626,14 @@ class OrderExecutionGateway:
 
         # 在 DRY_RUN 模式下启动虚拟成交追踪
         self._virtual_orders = {}
+        self._maker_stale_seconds = int(os.getenv("MAKER_STALE_SECONDS", "30"))
+        # Stale order sweeper: auto-cancel Maker orders after N seconds
+        if not CONFIG.flags.dry_run:
+            asyncio.create_task(
+                self._maker_stale_sweeper_loop(),
+                name="maker_stale_sweeper",
+            )
+            logger.info("oeg_stale_sweeper_started", stale_seconds=self._maker_stale_seconds)
         if CONFIG.flags.dry_run:
             asyncio.create_task(
                 self._virtual_fill_tracker_loop(),
@@ -828,6 +836,12 @@ class OrderExecutionGateway:
 
         # 注册到 pending 表, 等待 WS 撮合回执更新
         self._pending[signal.signal_id] = result
+        
+        # ── 淡出机制: 记录 Maker 订单放置时间 ──
+        if order_type == "GTX" and not CONFIG.flags.dry_run:
+            self._maker_order_times = getattr(self, '_maker_order_times', {})
+            self._maker_order_times[signal.signal_id] = time.time()
+            logger.debug("maker_order_placed_at", signal_id=signal.signal_id[:8])
 
         # 向 FillTracker 注册追踪
         if self._fill_tracker:
@@ -1037,12 +1051,25 @@ class OrderExecutionGateway:
                 expired = []
                 active_count = len(self._virtual_orders)
                 if active_count > 0:
-                    logger.debug("virtual_fill_tracker_check", active=active_count)
+                    logger.info("virtual_fill_tracker_check", active=active_count)
                 
                 for sig_id, vo in list(self._virtual_orders.items()):
                     age = now - vo["placed_at"]
                     
-                    # 过期: 5 分钟未成交 → 移除
+                    # 淡出机制: 超过 stale_seconds 仍双未成交 → 虚拟撤单
+                    if age > self._maker_stale_seconds and not vo["filled_yes"] and not vo["filled_no"]:
+                        logger.info(
+                            "virtual_stale_cancel",
+                            signal_id=sig_id[:8],
+                            age=f"{age:.0f}s",
+                            note="virtual stale order auto-cancelled (fade defense)",
+                        )
+                        self._stats.setdefault("virtual_stale_cancels", 0)
+                        self._stats["virtual_stale_cancels"] += 1
+                        expired.append(sig_id)
+                        continue
+                    
+                    # 最终过期: 5 分钟 → 移除
                     if age > 300:
                         logger.info(
                             "virtual_order_expired_unfilled",
@@ -1119,8 +1146,38 @@ class OrderExecutionGateway:
                         if vo["adverse_selection"]:
                             self._stats.setdefault("virtual_adverse_selections", 0)
                             self._stats["virtual_adverse_selections"] += 1
+                        # Persist to SQLite for weekend analysis
+                        try:
+                            import sqlite3 as _sq
+                            from pathlib import Path as _P
+                            _db = str(_P(__file__).resolve().parent.parent / "db" / "arbitrage.db")
+                            _c = _sq.connect(_db)
+                            _c.execute("""CREATE TABLE IF NOT EXISTS virtual_fills (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                signal_id TEXT, condition_id TEXT,
+                                bid_yes REAL, bid_no REAL, size REAL,
+                                fill_time_ms REAL, adverse_selection INTEGER,
+                                profit REAL, created_at TEXT DEFAULT (datetime('now')))""")
+                            _c.execute("INSERT INTO virtual_fills (signal_id,condition_id,bid_yes,bid_no,size,fill_time_ms,adverse_selection,profit) VALUES (?,?,?,?,?,?,?,?)",
+                                (sig_id, vo.get("condition_id",""), vo["bid_yes"], vo["bid_no"], vo["size"],
+                                 (now - vo["placed_at"]) * 1000, 1 if vo["adverse_selection"] else 0, profit))
+                            _c.commit()
+                            _c.close()
+                        except Exception as _dbe:
+                            logger.debug("virtual_fill_db_error: %s", _dbe)
                         expired.append(sig_id)
                 
+                # 统计
+                maker_stale = self._stats.get("virtual_stale_cancels", 0)
+                vf = self._stats.get("virtual_fills", 0)
+                va = self._stats.get("virtual_adverse_selections", 0)
+                logger.info(
+                    "virtual_tracker_status",
+                    active=len(self._virtual_orders),
+                    total_fills=vf,
+                    adverse=va,
+                    stale_cancels=maker_stale,
+                )
                 # 清除过期/完成的订单
                 for sig_id in expired:
                     self._virtual_orders.pop(sig_id, None)
@@ -1135,4 +1192,65 @@ class OrderExecutionGateway:
                 raise
             except Exception as e:
                 logger.warning("virtual_fill_tracker_error: %s", e)
+                await asyncio.sleep(30)
+
+    # ============================================================
+    # 淡出机制: 自动撤回超时 Maker 订单 (Adverse Selection Defense)
+    # ============================================================
+    async def _maker_stale_sweeper_loop(self) -> None:
+        """
+        实盘保护: 自动撤回存活超过 MAKER_STALE_SECONDS 的 Maker 订单。
+        
+        原理: 如果订单挂上 30 秒还没被成交, 说明市场冷清。
+        在冷清的市场中, 突发新闻砸盘的杀伤力最大 (Stale Quotes 被狙击)。
+        及时撤回未成交流动性 = 降低逆向选择风险。
+        """
+        client = self._get_client()
+        while True:
+            try:
+                await asyncio.sleep(10)
+                now = time.time()
+                stale_ids = []
+                
+                self._maker_order_times = getattr(self, '_maker_order_times', {})
+                for sig_id, placed_at in list(self._maker_order_times.items()):
+                    age = now - placed_at
+                    if age > self._maker_stale_seconds:
+                        stale_ids.append(sig_id)
+                
+                if not stale_ids:
+                    continue
+                
+                # Cancel stale orders
+                from py_clob_client_v2.clob_types import OrderPayload
+                for sig_id in stale_ids:
+                    result = self._pending.get(sig_id)
+                    if not result or result.is_complete:
+                        self._maker_order_times.pop(sig_id, None)
+                        continue
+                    
+                    # Cancel both legs
+                    for leg in [result.yes_result, result.no_result]:
+                        if leg.order_id and leg.status == OrderStatus.SUBMITTED:
+                            try:
+                                payload = OrderPayload(orderID=leg.order_id)
+                                await asyncio.to_thread(client.cancel_order, payload)
+                                logger.info(
+                                    "maker_stale_cancel",
+                                    signal_id=sig_id[:8],
+                                    order_id=leg.order_id[:16],
+                                    age=f"{age:.0f}s",
+                                    note="stale order auto-cancelled (fade defense)",
+                                )
+                            except Exception as e:
+                                logger.warning("maker_stale_cancel_error: %s", e)
+                    
+                    self._maker_order_times.pop(sig_id, None)
+                    self._stats.setdefault("maker_stale_cancels", 0)
+                    self._stats["maker_stale_cancels"] += 1
+                    
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("maker_stale_sweeper_error: %s", e)
                 await asyncio.sleep(30)

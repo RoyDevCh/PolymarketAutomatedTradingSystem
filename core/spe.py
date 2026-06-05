@@ -313,11 +313,39 @@ class StrategyPricingEngine:
             if best_bid_yes and best_bid_no:
                 bid_sum = best_bid_yes.price + best_bid_no.price
                 if bid_sum < 1.0:
-                    # 我们可以在当前 bid 下方挂单 (比 best_bid 低 1 tick)
-                    # 利润 = 1.0 - (our_bid_yes + our_bid_no)
+                    # ── 盘口微观失衡偏移 (Order Book Imbalance Skew) ──
+                    # 计算前 3 档量能比: ask_depth / bid_depth
+                    # 如果 ask 量能压倒性大 → 有暴跌风险 → 撤退 3-5 ticks
+                    # 如果 bid 量能大 → 安全 → 1 tick 正常挂单
                     tick = 0.01
-                    our_bid_yes = max(0.01, round(best_bid_yes.price - tick, 2))
-                    our_bid_no = max(0.01, round(best_bid_no.price - tick, 2))
+                    ask_depth_yes = sum(a.size for a in yes_ob.asks[:3])
+                    bid_depth_yes = sum(b.size for b in yes_ob.bids[:3])
+                    ask_depth_no = sum(a.size for a in no_ob.asks[:3])
+                    bid_depth_no = sum(b.size for b in no_ob.bids[:3])
+
+                    total_ask = ask_depth_yes + ask_depth_no
+                    total_bid = bid_depth_yes + bid_depth_no
+                    imbalance_ratio = total_ask / total_bid if total_bid > 0 else 5.0
+
+                    if imbalance_ratio > 3.0:
+                        # 严重卖压: 撤退 5 ticks 避险
+                        skew_ticks = 5
+                        skew_reason = "HIGH_SELL_PRESSURE"
+                    elif imbalance_ratio > 2.0:
+                        # 中度卖压: 撤退 3 ticks
+                        skew_ticks = 3
+                        skew_reason = "MODERATE_SELL_PRESSURE"
+                    elif imbalance_ratio < 0.5:
+                        # 买方强势: 1 tick 足够
+                        skew_ticks = 1
+                        skew_reason = "BUY_DOMINANT"
+                    else:
+                        # 均衡: 1-2 ticks
+                        skew_ticks = 1
+                        skew_reason = "BALANCED"
+
+                    our_bid_yes = max(0.01, round(best_bid_yes.price - skew_ticks * tick, 2))
+                    our_bid_no = max(0.01, round(best_bid_no.price - skew_ticks * tick, 2))
                     our_bid_sum = our_bid_yes + our_bid_no
                     if our_bid_sum > 0 and our_bid_sum < 1.0:
                         profit_per_share = 1.0 - our_bid_sum
@@ -334,6 +362,9 @@ class StrategyPricingEngine:
                                 our_bid_sum=our_bid_sum,
                                 profit_per_share=profit_per_share,
                                 total_profit=f"${total_profit:.4f}",
+                                imbalance_ratio=f"{imbalance_ratio:.1f}",
+                                skew_ticks=skew_ticks,
+                                skew_reason=skew_reason,
                             )
                             self._generate_signal(
                                 signal_type=SignalType.MAKER_ARB,

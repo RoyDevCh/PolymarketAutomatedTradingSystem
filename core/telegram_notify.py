@@ -78,6 +78,12 @@ def build_heartbeat_message(stats: dict[str, Any]) -> str:
     virtual_active = stats.get("virtual_orders_active", 0)
     if virtual_active:
         lines.append(f"Virtual orders active: {virtual_active}")
+    virtual_stale = stats.get("virtual_stale_cancels", 0)
+    if virtual_stale:
+        lines.append(f"Virtual stale cancels: {virtual_stale}")
+    maker_stale = stats.get("maker_stale_cancels", 0)
+    if maker_stale:
+        lines.append(f"Maker stale cancels: {maker_stale}")
     oeg = stats.get("oeg")
     rmc = stats.get("rmc")
     if oeg:
