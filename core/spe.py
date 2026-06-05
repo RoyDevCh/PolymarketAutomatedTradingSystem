@@ -28,6 +28,7 @@ from core.models import (
     SignalType,
     TradeSignal,
 )
+from core.grid_maker import GridMaker, GridSignal
 
 logger = structlog.get_logger(__name__)
 
@@ -67,6 +68,9 @@ class StrategyPricingEngine:
         # 去重: 最近 N 秒内已发出的信号, 防止重复下单
         self._recent_signals: dict[str, float] = {}
         self._signal_dedup_window: float = 60.0  # 60秒去重窗口 (Maker信号低频)
+
+        # Phase 4: 深度网格做市引擎
+        self.grid_maker = GridMaker(CONFIG.trading)
 
     def register_market(self, market: MarketInfo) -> None:
         """注册市场信息 (由 MDG 调用)"""
@@ -378,19 +382,20 @@ class StrategyPricingEngine:
                             )
                             return
 
-            # 模式 B2: Taker-Maker 交叉套利
-            implied_no_ask = 1.0 - best_bid_no.price
-            if best_ask_yes.price < implied_no_ask:
-                potential_spread = implied_no_ask - best_ask_yes.price
-                logger.info(
-                    "spe_cross_arb_detected",
-                    condition_id=condition_id[:16],
-                    yes_ask=best_ask_yes.price,
-                    no_bid=best_bid_no.price if best_bid_no else None,
-                    implied_no_ask=implied_no_ask,
-                    spread=potential_spread,
-                    note="ASK+BID cross arb (maker strategy required)",
-                )
+                # ============================================================
+                # 模式 B2: Taker-Maker 交叉套利
+                implied_no_ask = 1.0 - best_bid_no.price
+                if best_ask_yes.price < implied_no_ask:
+                    potential_spread = implied_no_ask - best_ask_yes.price
+                    logger.info(
+                        "spe_cross_arb_detected",
+                        condition_id=condition_id[:16],
+                        yes_ask=best_ask_yes.price,
+                        no_bid=best_bid_no.price if best_bid_no else None,
+                        implied_no_ask=implied_no_ask,
+                        spread=potential_spread,
+                        note="ASK+BID cross arb (maker strategy required)",
+                    )
 
         if best_ask_no and best_bid_yes:
             # 对称: 买 NO, YES_ask > 1 - YES_bid
@@ -406,6 +411,18 @@ class StrategyPricingEngine:
                     spread=potential_spread,
                     note="NO ASK + YES BID cross arb (maker strategy)",
                 )
+
+        # ============================================================
+        # Phase 4: 深度网格做市评估
+        # ============================================================
+        if self.cfg.grid_enabled:
+            grid_signal = self.grid_maker.evaluate_grid(
+                condition_id=condition_id,
+                yes_ob=yes_ob,
+                no_ob=no_ob,
+            )
+            if grid_signal:
+                self._emit_grid_signal(grid_signal)
 
 
     def _generate_signal(
@@ -555,6 +572,51 @@ class StrategyPricingEngine:
                 logger.error("spe_process_error", error=str(e))
                 await asyncio.sleep(0.1)
 
+    def _emit_grid_signal(self, grid_signal: GridSignal) -> None:
+        """将 GridSignal 转换为多个 TradeSignal 并推入执行队列"""
+        for level in grid_signal.levels:
+            # 确定是 YES 还是 NO
+            is_yes = level.side == "YES"
+            token_id = grid_signal.yes_token_id if is_yes else grid_signal.no_token_id
+            other_token_id = grid_signal.no_token_id if is_yes else grid_signal.yes_token_id
+            other_price = level.price  # 对称挂单
+            other_size = level.size
+            
+            # 对于网格做市, 我们只挂单侧 (减少风险)
+            # 同时挂 YES 和 NO 的利润相同, 但风险是单边成交
+            signal = TradeSignal(
+                signal_id=f"grid-{grid_signal.signal_id}-{level.side}-{level.layer}",
+                signal_type=SignalType.MAKER_ARB,  # 复用 MAKER_ARB 类型
+                condition_id=grid_signal.condition_id,
+                market_question=grid_signal.market_question,
+                yes_token_id=grid_signal.yes_token_id if is_yes else other_token_id,
+                yes_price=level.price if is_yes else other_price,
+                yes_size=level.size if is_yes else 0.0,
+                no_token_id=grid_signal.no_token_id if not is_yes else other_token_id,
+                no_price=level.price if not is_yes else other_price,
+                no_size=level.size if not is_yes else 0.0,
+                expected_profit=level.expected_profit_per_share * level.size,
+                slippage_estimate=0.0,  # Grid: no slippage (maker orders)
+                total_cost=level.price * level.size,
+                order_type="GTC",  # Grid orders are GTC (not post-only)
+            )
+            
+            try:
+                self.signal_queue.put_nowait(signal)
+                logger.info(
+                    "grid_signal_emitted",
+                    signal_id=signal.signal_id[:12],
+                    side=level.side,
+                    price=level.price,
+                    size=level.size,
+                    layer=level.layer,
+                    depth_ticks=level.depth_ticks,
+                    expected_profit=f"${level.expected_profit_per_share:.4f}/share",
+                    condition_id=grid_signal.condition_id[:16],
+                )
+            except asyncio.QueueFull:
+                logger.warning("signal_queue_full, dropping grid signal")
+
     def cleanup_stale_signals(self, max_age: float = 60.0) -> None:
         """清理过期的去重记录"""
         now = time.time()
@@ -564,3 +626,9 @@ class StrategyPricingEngine:
         ]
         for k in expired:
             del self._recent_signals[k]
+
+        # 同时清理 Grid Maker 的去重记录
+        self.grid_maker._recent_signals = {
+            k: v for k, v in self.grid_maker._recent_signals.items()
+            if now - v <= max_age
+        }

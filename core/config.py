@@ -63,6 +63,20 @@ class TradingConfig:
     # ── Maker 策略约束 ──
     max_concurrent_markets: int = int(os.getenv("MAX_CONCURRENT_MARKETS", "2"))
     min_shares_per_leg: int = int(os.getenv("MIN_SHARES_PER_LEG", "5"))  # Polymarket 最低 5 股
+    # ── Phase 4: 深度做市策略 ──
+    maker_stale_seconds: int = int(os.getenv("MAKER_STALE_SECONDS", "60"))
+    # ── Phase 4: 深度网格做市 ──
+    grid_enabled: bool = os.getenv("GRID_MM_ENABLED", "false").lower() in ("1", "true", "yes")
+    grid_min_profit_per_share: float = float(os.getenv("GRID_MIN_PROFIT", "0.08"))  # 最小每股利润 8¢
+    grid_deep_ticks: int = int(os.getenv("GRID_DEEP_TICKS", "5"))          # 深水区距离 = 5 ticks (5¢)
+    grid_shallow_ticks: int = int(os.getenv("GRID_SHALLOW_TICKS", "2"))    # 浅水区距离 = 2 ticks (2¢)
+    grid_deep_size_usd: float = float(os.getenv("GRID_DEEP_SIZE", "2.0"))    # 深水区单笔 $2
+    grid_shallow_size_usd: float = float(os.getenv("GRID_SHALLOW_SIZE", "1.0"))  # 浅水区单笔 $1
+    grid_volatility_window: int = int(os.getenv("GRID_VOL_WINDOW", "100"))   # 波动率计算窗口 = 100 snapshots
+    # ── Phase 4: 持仓对冲 ──
+    hedge_enabled: bool = os.getenv("HEDGE_ENABLED", "false").lower() in ("1", "true", "yes")
+    hedge_max_inventory_usd: float = float(os.getenv("HEDGE_MAX_INVENTORY", "5.0"))  # 最大单边持仓 $5
+    hedge_correlation_threshold: float = float(os.getenv("HEDGE_CORRELATION", "0.7"))    # 相关性阈值
 
 
 @dataclass(frozen=True)
