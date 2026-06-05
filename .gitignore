@@ -45,3 +45,15 @@ logs/
 # ---- 临时文件 ----
 tmp/
 temp/
+
+# ---- 调试/分析脚本 (本地用, 不提交) ----
+check_*.py
+analyze_*.py
+decode_*.py
+track_*.py
+find_*.py
+money_*.py
+deploy_scanner.py
+monitor_phase3.py
+poke_spe.py
+patch_db.py
