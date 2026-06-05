@@ -717,6 +717,7 @@ class OrderExecutionGateway:
         # ⚡ 核心: 并发下单, 消除 Leg Risk ⚡
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         try:
+            order_type = getattr(signal, 'order_type', 'GTC') or 'GTC'
             yes_task = asyncio.create_task(
                 self._place_order(
                     token_id=signal.yes_token_id,
@@ -726,6 +727,7 @@ class OrderExecutionGateway:
                     signal_id=signal.signal_id,
                     condition_id=signal.condition_id,
                     order_side=Side.YES,
+                    order_type=order_type,
                 )
             )
             no_task = asyncio.create_task(
@@ -737,6 +739,7 @@ class OrderExecutionGateway:
                     signal_id=signal.signal_id,
                     condition_id=signal.condition_id,
                     order_side=Side.NO,
+                    order_type=order_type,
                 )
             )
 
@@ -820,6 +823,37 @@ class OrderExecutionGateway:
             if self._circuit_breaker_callback:
                 self._circuit_breaker_callback(signal.condition_id)
 
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 📨 Telegram 通知: Maker 信号执行结果 (限频5min/condition)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        self._stats.setdefault("maker_signals_today", 0)
+        self._stats["maker_signals_today"] += 1
+        if signal.signal_type.name == "MAKER_ARB":
+            cid = signal.condition_id[:16]
+            now = time.time()
+            self._maker_tg_last = getattr(self, '_maker_tg_last', {})
+            if now - self._maker_tg_last.get(cid, 0) > 300:
+                self._maker_tg_last[cid] = now
+                try:
+                    from core.telegram_notify import send_message, build_maker_signal_message
+                    from core.config import CONFIG as _CFG
+                    tg = _CFG.telegram
+                    if tg.enabled and tg.bot_token and tg.chat_id:
+                        msg = build_maker_signal_message({
+                            "question": signal.market_question[:50],
+                            "bid_sum": signal.yes_price + signal.no_price,
+                            "our_bid_yes": signal.yes_price,
+                            "our_bid_no": signal.no_price,
+                            "profit_per_share": 1.0 - (signal.yes_price + signal.no_price),
+                            "total_profit": signal.expected_profit,
+                            "size": signal.yes_size,
+                            "order_status": f"YES={yes_result.status.name} NO={no_result.status.name}",
+                        })
+                        await send_message(tg.bot_token, tg.chat_id, msg)
+                        logger.info("oeg_maker_signal_telegram_sent")
+                except Exception as e:
+                    logger.warning("oeg_maker_telegram_error: %s", e)
+
         return result
 
     async def _place_order(
@@ -831,6 +865,7 @@ class OrderExecutionGateway:
         signal_id: str,
         condition_id: str,
         order_side: Side,
+        order_type: str = "GTC",
     ) -> ExecutionResult:
         """通过 py-clob-client 创建并发送订单"""
         result = ExecutionResult(
@@ -844,30 +879,27 @@ class OrderExecutionGateway:
         try:
             client = self._get_client()
 
-            logger.info(
-                "oeg_placing_order",
-                signal_id=signal_id[:8],
-                side=order_side.value,
-                order_type=order_type_str,
-                price=price,
-                size=size,
-                token_id=token_id[:16],
-            )
-
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # 使用 py-clob-client SDK 下单
             # 内部自动处理 EIP-712 签名
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             from py_clob_client_v2.clob_types import OrderArgs, OrderType as ClobOrderType
 
-            # v1.4: 支持 GTX (Maker-Only) 模式
-            order_type_str = getattr(signal, 'order_type', 'GTC') or 'GTC'
-            try:
-                clob_order_type = ClobOrderType(order_type_str)
-            except ValueError:
-                clob_order_type = ClobOrderType.GTC
-            # GTX = GTC + post_only=True (Polymarket API doesn't have OrderType.GTX)
-            post_only = order_type_str == "GTX"
+            # v1.4: support GTX (Maker-Only) via post_only=True
+            # Polymarket SDK has no OrderType.GTX; Maker orders = GTC + post_only=True
+            post_only = order_type == "GTX"
+            clob_order_type = ClobOrderType.GTC  # always GTC; maker via post_only flag
+
+            logger.info(
+                "oeg_placing_order",
+                signal_id=signal_id[:8],
+                side=order_side.value,
+                order_type=order_type,
+                post_only=post_only,
+                price=price,
+                size=size,
+                token_id=token_id[:16],
+            )
 
             order_args = OrderArgs(
                 token_id=token_id,

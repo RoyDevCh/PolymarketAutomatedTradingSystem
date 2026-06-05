@@ -162,9 +162,9 @@ class OrderRequest:
 @dataclass
 class ExecutionResult:
     """单腿执行结果"""
-    signal_id: str
-    token_id: str
-    side: Side
+    signal_id: str = ""
+    token_id: str = ""
+    side: Side = Side.YES
     order_id: str = ""
     status: OrderStatus = OrderStatus.PENDING
     filled_size: float = 0.0

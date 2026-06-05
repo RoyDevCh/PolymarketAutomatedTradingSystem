@@ -66,7 +66,7 @@ class StrategyPricingEngine:
 
         # 去重: 最近 N 秒内已发出的信号, 防止重复下单
         self._recent_signals: dict[str, float] = {}
-        self._signal_dedup_window: float = 2.0  # 2秒去重窗口
+        self._signal_dedup_window: float = 60.0  # 60秒去重窗口 (Maker信号低频)
 
     def register_market(self, market: MarketInfo) -> None:
         """注册市场信息 (由 MDG 调用)"""
@@ -316,13 +316,13 @@ class StrategyPricingEngine:
                     # 我们可以在当前 bid 下方挂单 (比 best_bid 低 1 tick)
                     # 利润 = 1.0 - (our_bid_yes + our_bid_no)
                     tick = 0.01
-                    our_bid_yes = round(best_bid_yes.price - tick, 2)
-                    our_bid_no = round(best_bid_no.price - tick, 2)
+                    our_bid_yes = max(0.01, round(best_bid_yes.price - tick, 2))
+                    our_bid_no = max(0.01, round(best_bid_no.price - tick, 2))
                     our_bid_sum = our_bid_yes + our_bid_no
                     if our_bid_sum > 0 and our_bid_sum < 1.0:
                         profit_per_share = 1.0 - our_bid_sum
                         budget = self.cfg.max_trade_size
-                        size = round(budget / our_bid_sum, 2) if our_bid_sum > 0 else 0
+                        size = max(5.0, round(budget / our_bid_sum, 2)) if our_bid_sum > 0 else 0
                         total_profit = profit_per_share * size
                         if total_profit >= self.cfg.min_profit_threshold:
                             logger.info(
