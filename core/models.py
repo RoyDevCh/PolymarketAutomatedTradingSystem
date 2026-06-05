@@ -24,14 +24,15 @@ class Side(Enum):
 class OrderType(Enum):
     """订单类型"""
     GTC = "GTC"        # Good Till Cancelled
-    GTX = "GTX"        # Good Till Crossing (只做 Maker)
+    GTX = "GTX"        # Good Till Crossing (只做 Maker / Post-Only)
     FOK = "FOK"        # Fill or Kill
     IOC = "IOC"        # Immediate or Cancel
 
 
 class SignalType(Enum):
     """信号类型"""
-    ARBITRAGE = auto()         # 套利信号
+    ARBITRAGE = auto()         # Taker 套利: ask_yes + ask_no < 1
+    MAKER_ARB = auto()        # Maker 套利: bid_yes + bid_no < 1 (GTX)
     HEDGE = auto()            # 对冲信号
     EMERGENCY_CLOSE = auto()  # 紧急平仓信号
 
@@ -140,6 +141,7 @@ class TradeSignal:
     # 元信息
     timestamp: float = field(default_factory=time.time)
     priority: int = 0       # 优先级, 0=最高
+    order_type: str = "GTC"  # GTC (taker) or GTX (maker)
 
 
 # ============================================================

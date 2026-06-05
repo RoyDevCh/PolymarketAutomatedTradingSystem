@@ -844,10 +844,11 @@ class OrderExecutionGateway:
         try:
             client = self._get_client()
 
-            logger.debug(
+            logger.info(
                 "oeg_placing_order",
                 signal_id=signal_id[:8],
                 side=order_side.value,
+                order_type=order_type_str,
                 price=price,
                 size=size,
                 token_id=token_id[:16],
@@ -859,6 +860,15 @@ class OrderExecutionGateway:
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             from py_clob_client_v2.clob_types import OrderArgs, OrderType as ClobOrderType
 
+            # v1.4: 支持 GTX (Maker-Only) 模式
+            order_type_str = getattr(signal, 'order_type', 'GTC') or 'GTC'
+            try:
+                clob_order_type = ClobOrderType(order_type_str)
+            except ValueError:
+                clob_order_type = ClobOrderType.GTC
+            # GTX = GTC + post_only=True (Polymarket API doesn't have OrderType.GTX)
+            post_only = order_type_str == "GTX"
+
             order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
@@ -868,7 +878,7 @@ class OrderExecutionGateway:
 
             signed_order = await asyncio.to_thread(client.create_order, order_args)
             response = await asyncio.to_thread(
-                client.post_order, signed_order, ClobOrderType.GTC
+                client.post_order, signed_order, clob_order_type, post_only
             )
 
             elapsed_ms = (time.time() - start_ts) * 1000

@@ -304,13 +304,55 @@ class StrategyPricingEngine:
         # 例: YES_ask=0.45, NO_bid=0.48 > YES_ask < 1-0.48=0.52 ✓
         # ================================================================
         if best_ask_yes and best_bid_no:
-            # 买 YES, 想 NO 的 bid 方卖 NO
-            # 即: YES_ask < 1 - NO_bid
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 模式 B1: Maker 双边 Bid 套利 (转向一)
+            # 如果 Bid_YES + Bid_NO + Margin < 1, 我们挂更低的 bid
+            # 例: bid_yes=0.48, bid_no=0.48 → sum=0.96 → 我们挂 0.47/0.47
+            # 终态赔付 1.0, 成本 0.94, 利润 0.06
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            if best_bid_yes and best_bid_no:
+                bid_sum = best_bid_yes.price + best_bid_no.price
+                if bid_sum < 1.0:
+                    # 我们可以在当前 bid 下方挂单 (比 best_bid 低 1 tick)
+                    # 利润 = 1.0 - (our_bid_yes + our_bid_no)
+                    tick = 0.01
+                    our_bid_yes = round(best_bid_yes.price - tick, 2)
+                    our_bid_no = round(best_bid_no.price - tick, 2)
+                    our_bid_sum = our_bid_yes + our_bid_no
+                    if our_bid_sum > 0 and our_bid_sum < 1.0:
+                        profit_per_share = 1.0 - our_bid_sum
+                        budget = self.cfg.max_trade_size
+                        size = round(budget / our_bid_sum, 2) if our_bid_sum > 0 else 0
+                        total_profit = profit_per_share * size
+                        if total_profit >= self.cfg.min_profit_threshold:
+                            logger.info(
+                                "spe_maker_arb_detected",
+                                condition_id=condition_id[:16],
+                                bid_sum=bid_sum,
+                                our_bid_sum=our_bid_sum,
+                                profit_per_share=profit_per_share,
+                                total_profit=f"${total_profit:.4f}",
+                            )
+                            self._generate_signal(
+                                signal_type=SignalType.MAKER_ARB,
+                                condition_id=condition_id,
+                                yes_ob=yes_ob,
+                                no_ob=no_ob,
+                                vwap_yes=our_bid_yes,
+                                vwap_no=our_bid_no,
+                                actual_size=size,
+                                expected_profit=total_profit,
+                                total_slippage=0.0,  # maker: no slippage
+                                total_cost=our_bid_sum * size,
+                                theoretical_spread=1.0 - bid_sum,
+                                order_type="GTX",
+                            )
+                            return
+
+            # 模式 B2: Taker-Maker 交叉套利
             implied_no_ask = 1.0 - best_bid_no.price
             if best_ask_yes.price < implied_no_ask:
                 potential_spread = implied_no_ask - best_ask_yes.price
-                # 这需要 maker 侧策略, 暂不实现
-                # 但记录诊断
                 logger.info(
                     "spe_cross_arb_detected",
                     condition_id=condition_id[:16],
@@ -350,6 +392,7 @@ class StrategyPricingEngine:
         total_slippage: float,
         total_cost: float,
         theoretical_spread: float = 0.0,
+        order_type: str = "GTC",
     ) -> None:
         """生成 TradeSignal 并推入执行队列"""
         now = time.time()
@@ -379,6 +422,7 @@ class StrategyPricingEngine:
             total_cost=total_cost,
             timestamp=now,
             priority=0,
+            order_type=order_type,
         )
 
         try:
