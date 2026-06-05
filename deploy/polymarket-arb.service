@@ -1,38 +1,22 @@
 [Unit]
-Description=Polymarket Automated Arbitrage Engine
+Description=Polymarket arbitrage trading bot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=polymarket
-Group=polymarket
-WorkingDirectory=/opt/polymarket-arb
-ExecStart=/opt/polymarket-arb/venv/bin/python main.py
+User=roy
+WorkingDirectory=/home/roy/polymarket-arb
+EnvironmentFile=-/home/roy/polymarket-arb/.env
+Environment=HTTP_PROXY=http://127.0.0.1:7890
+Environment=HTTPS_PROXY=http://127.0.0.1:7890
+Environment=ALL_PROXY=socks5://127.0.0.1:7890
+Environment=NO_PROXY=localhost,127.0.0.1,192.168.0.0/16
+ExecStart=/home/roy/polymarket-arb/venv/bin/python /home/roy/polymarket-arb/main.py
 Restart=always
-RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-# 环境变量
-EnvironmentFile=/opt/polymarket-arb/.env
-
-# 安全加固
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/polymarket-arb/db
-PrivateTmp=true
-
-# 资源限制
-LimitNOFILE=65536
-MemoryMax=512M
-CPUQuota=50%
-
-# 日志
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=polymarket-arb
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target

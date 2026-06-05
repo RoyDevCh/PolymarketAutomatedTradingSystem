@@ -85,7 +85,8 @@ class RiskManagementCenter:
         self._write_pause_until: float = 0.0
         
         # ---- 信号元数据缓存 (用于日志补全) ----
-        self._signal_meta: dict[str, dict] = {}  # signal_id -> {market_question, yes_price, no_price, slippage}
+        self._signal_meta: dict[str, dict] = {}
+        self._last_signal_time: float | None = None  # {market_question, yes_price, no_price, slippage}
 
     # ================================================================
     # 数据库初始化
@@ -181,6 +182,9 @@ class RiskManagementCenter:
 
     async def on_trade_signal(self, signal: "TradeSignal") -> None:
         """接收 SPE 生成的信号, 缓存元数据供后续日志写入使用"""
+        import time
+
+        self._last_signal_time = time.time()
         self._signal_meta[signal.signal_id] = {
             "market_question": signal.market_question,
             "yes_price": signal.yes_price,
@@ -424,6 +428,53 @@ class RiskManagementCenter:
         except Exception as e:
             logger.error("rmc_log_error", error=str(e))
 
+
+    async def on_fill_update(
+        self,
+        signal_id: str,
+        side: str,
+        fill_price: float,
+        fill_size: float,
+        status: str,
+    ) -> None:
+        """Update trade_log per-leg fill fields when OEG confirms a fill."""
+        if not self._db:
+            return
+        side_u = (side or "").upper()
+        if side_u == "YES":
+            await self._db.execute(
+                """
+                UPDATE trade_log SET
+                    yes_fill_price = ?,
+                    yes_filled_size = ?,
+                    yes_status = ?
+                WHERE signal_id = ?
+                """,
+                (fill_price, fill_size, status, signal_id),
+            )
+        elif side_u == "NO":
+            await self._db.execute(
+                """
+                UPDATE trade_log SET
+                    no_fill_price = ?,
+                    no_filled_size = ?,
+                    no_status = ?
+                WHERE signal_id = ?
+                """,
+                (fill_price, fill_size, status, signal_id),
+            )
+        else:
+            return
+        await self._db.commit()
+        logger.info(
+            "rmc_fill_updated",
+            signal_id=signal_id[:8],
+            side=side_u,
+            price=fill_price,
+            size=fill_size,
+            status=status,
+        )
+
     async def _log_circuit_breaker(self, event: CircuitBreakerEvent) -> None:
         """将熔断事件写入 SQLite"""
         if not self._db:
@@ -502,3 +553,16 @@ class RiskManagementCenter:
             except Exception as e:
                 logger.error("rmc_maintenance_error", error=str(e))
                 await asyncio.sleep(10)
+
+    def get_process_stats(self) -> dict:
+        """Lightweight stats for Telegram heartbeat."""
+        from datetime import datetime, timezone
+        import time as _time
+
+        out: dict = {"signal_meta_cache_size": len(self._signal_meta)}
+        if self._last_signal_time:
+            out["last_signal_time"] = datetime.fromtimestamp(
+                self._last_signal_time, tz=timezone.utc
+            ).isoformat()
+        out["db_open"] = bool(self._db)
+        return out

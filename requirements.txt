@@ -7,7 +7,10 @@ aiohttp>=3.9.0
 websockets>=12.0
 
 # ---- Polymarket CLOB SDK ----
-py-clob-client>=0.1.0
+py-clob-client-v2>=1.0.1
+py-clob-client>=0.34.0
+py-builder-relayer-client>=0.0.2
+py-builder-signing-sdk>=0.0.1
 
 # ---- 密码学 & Web3 ----
 eth-account>=0.10.0
@@ -29,3 +32,4 @@ structlog>=23.2.0
 
 # ---- Phase 4: Telegram ----
 python-telegram-bot>=20.0
+paramiko

@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 import sys
 from pathlib import Path
 
@@ -60,6 +61,8 @@ from core.mdg import MarketDataGateway
 from core.oeg import OrderExecutionGateway
 from core.rmc import RiskManagementCenter
 from core.spe import StrategyPricingEngine
+from core.heartbeat import telegram_heartbeat_loop
+from core.phase3_notify import phase3_notify_loop
 
 logger = structlog.get_logger(__name__)
 
@@ -110,6 +113,7 @@ class ArbitrageEngine:
         self.oeg = OrderExecutionGateway(
             result_callback=self._on_arbitrage_result,
             circuit_breaker_callback=self._on_circuit_breaker,
+            fill_update_callback=self.rmc.on_fill_update,
         )
 
         # 建立双向引用 (RMC 需要 OEG 引用来 disable_market)
@@ -149,6 +153,43 @@ class ArbitrageEngine:
         """OEG 触发熔断: 禁用特定市场"""
         self.oeg.disable_market(condition_id)
 
+
+    async def _get_db_for_phase3(self):
+        return self.rmc._db
+
+    async def _collect_heartbeat_stats(self) -> dict:
+        stats: dict = {
+            "markets_monitored": len(getattr(self.spe, "_markets", {}) or {}),
+            "oeg": self.oeg.get_stats(),
+            "rmc": self.rmc.get_process_stats() if hasattr(self.rmc, "get_process_stats") else {},
+        }
+        rmc = stats.get("rmc") or {}
+        if isinstance(rmc, dict) and rmc.get("last_signal_time"):
+            stats["last_signal_time"] = rmc["last_signal_time"]
+        if self.rmc._db:
+            from datetime import datetime, timezone
+
+            day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            try:
+                cursor = await self.rmc._db.execute(
+                    "SELECT COUNT(*) FROM trade_log WHERE timestamp >= ?",
+                    (day_start,),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    stats["trades_today"] = row[0]
+            except Exception:
+                stats["trades_today"] = "unavailable"
+        try:
+            from core.clob_client import get_collateral_balance_usd
+
+            client = self.oeg._client or self.oeg._get_client()
+            balance = await asyncio.to_thread(get_collateral_balance_usd, client)
+            stats["clob_balance"] = f"${balance:.2f}" if balance is not None else "unavailable"
+        except Exception:
+            stats.setdefault("clob_balance", "unavailable")
+        return stats
+
     async def start(self) -> None:
         """启动整个系统"""
         logger.info("=" * 60)
@@ -159,6 +200,7 @@ class ArbitrageEngine:
         logger.info("=" * 60)
 
         self._running = True
+        self._started_at = time.time()
 
         # ── 初始化数据库 ──
         await self.rmc.init_db()
@@ -200,6 +242,20 @@ class ArbitrageEngine:
             asyncio.create_task(
                 self.rmc.maintenance_loop(),
                 name="rmc_maintenance",
+            ),
+            asyncio.create_task(
+                telegram_heartbeat_loop(
+                    self._collect_heartbeat_stats,
+                    started_at=self._started_at,
+                ),
+                name="telegram_heartbeat",
+            ),
+            asyncio.create_task(
+                phase3_notify_loop(
+                    lambda: self._get_db_for_phase3(),
+                    started_at=self._started_at,
+                ),
+                name="phase3_pass_notify",
             ),
         ]
 

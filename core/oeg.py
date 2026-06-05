@@ -453,6 +453,7 @@ class OrderExecutionGateway:
         self,
         result_callback: Callable,
         circuit_breaker_callback: Callable,
+        fill_update_callback: Callable | None = None,
     ):
         self.cfg = CONFIG.clob
         self.trading_cfg = CONFIG.trading
@@ -460,6 +461,7 @@ class OrderExecutionGateway:
         # 回调函数
         self._result_callback = result_callback
         self._circuit_breaker_callback = circuit_breaker_callback
+        self._fill_update_callback = fill_update_callback
 
         # CLOB Client (惰性初始化)
         self._client = None
@@ -505,7 +507,7 @@ class OrderExecutionGateway:
         self._try_complete_arbitrage(tracker.signal_id)
 
     def _on_trade_confirmed(self, tracker: OrderTracker) -> None:
-        """FillTracker 回调: 交易链上确认"""
+        """FillTracker callback: on-chain trade confirmed."""
         self._stats["orders_confirmed"] += 1
         logger.info(
             "oeg_trade_confirmed_ws",
@@ -515,6 +517,32 @@ class OrderExecutionGateway:
             size=tracker.confirmed_size,
             price=tracker.confirmed_price,
         )
+        meta = self._pending.get(tracker.signal_id)
+        if meta and getattr(meta, "yes_result", None):
+            exp_yes = meta.yes_result.price
+            exp_no = meta.no_result.price
+            exp = exp_yes if tracker.side == Side.YES else exp_no
+            if exp and tracker.confirmed_price:
+                slip = abs(tracker.confirmed_price - exp)
+                if slip > 0.001:
+                    logger.warning(
+                        "SLIPPAGE_DEVIATION",
+                        signal_id=tracker.signal_id[:8],
+                        side=tracker.side.value,
+                        expected=exp,
+                        actual=tracker.confirmed_price,
+                        deviation=slip,
+                    )
+        if self._fill_update_callback:
+            asyncio.create_task(
+                self._fill_update_callback(
+                    tracker.signal_id,
+                    tracker.side.value,
+                    tracker.confirmed_price,
+                    tracker.confirmed_size,
+                    "CONFIRMED",
+                )
+            )
 
     def _on_trade_failed(self, tracker: OrderTracker) -> None:
         """FillTracker 回调: 交易失败"""
@@ -797,7 +825,7 @@ class OrderExecutionGateway:
             # 使用 py-clob-client SDK 下单
             # 内部自动处理 EIP-712 签名
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client_v2.clob_types import OrderArgs, OrderType as ClobOrderType
 
             order_args = OrderArgs(
                 token_id=token_id,
@@ -806,8 +834,10 @@ class OrderExecutionGateway:
                 side=side,
             )
 
-            signed_order = client.create_order(order_args)
-            response = client.post_order(signed_order, OrderType.GTC)
+            signed_order = await asyncio.to_thread(client.create_order, order_args)
+            response = await asyncio.to_thread(
+                client.post_order, signed_order, ClobOrderType.GTC
+            )
 
             elapsed_ms = (time.time() - start_ts) * 1000
 
